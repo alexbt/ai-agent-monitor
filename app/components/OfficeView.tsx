@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import type { SessionInfo, CommEvent } from "@/lib/scanner";
 import {
   useSnapshot,
@@ -381,6 +382,15 @@ export default function OfficeView({ provider }: { provider: Provider }) {
   const { snapshot, connected, now } = useSnapshot(1000, provider);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  // Focus the session named in ?session=… when arriving from the Session Log.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("session");
+    if (id) setSelectedId(id);
+  }, []);
+
+  // Where the "Log" button links back to for this provider.
+  const logHref = provider === "codex" ? "/codex" : "/claude";
+
   const sessions: (SessionInfo & { projectName: string })[] = (
     snapshot?.projects ?? []
   ).flatMap((p) => p.sessions.map((s) => ({ ...s, projectName: p.displayName })));
@@ -462,6 +472,13 @@ export default function OfficeView({ provider }: { provider: Provider }) {
               onSelect={setSelectedId}
               now={now}
             />
+            <Link
+              className="nav-btn"
+              href={`${logHref}?session=${encodeURIComponent(selected.id)}`}
+              title="Open this session in the Session Log"
+            >
+              ☰ Log
+            </Link>
           </div>
 
           <div className="office-panel">
