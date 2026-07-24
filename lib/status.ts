@@ -18,6 +18,57 @@ const LOOKBACK_MS = 7 * DAY_MS;
 // Transcripts are read whole; past this size only the tail is worth scanning.
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 
+// First-party Anthropic list prices, USD per million tokens. cacheRead is 0.1x
+// input and cacheWrite is 1.25x input (5-minute-TTL rate) per Anthropic's
+// published caching multipliers — see COST_ASSUMPTIONS below for the caveats.
+// Only Claude models are priced; anything not matched here (Codex/OpenAI models,
+// retired Opus/Sonnet tiers with different rates) is left unpriced rather than
+// guessed at.
+interface Rate {
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+}
+
+function rate(input: number, output: number): Rate {
+  return { input, output, cacheWrite: input * 1.25, cacheRead: input * 0.1 };
+}
+
+const OPUS = rate(5, 25);
+const SONNET = rate(3, 15);
+const HAIKU = rate(1, 5);
+const FABLE = rate(10, 50);
+
+export const COST_ASSUMPTIONS =
+  "First-party Anthropic list prices. Cache writes are billed at the 5-minute-TTL rate (1.25x input); 1-hour-TTL writes actually cost 2x, so heavy 1h-cache use is slightly under-counted. Excludes batch (50%) and any intro/tier discounts. Codex/OpenAI models are unpriced. An estimate, not a bill.";
+
+// Match a transcript model id (which may carry a "[1m]" tag or a date suffix)
+// to a rate. Only versions with confirmed $5/$25-class pricing are matched;
+// older Opus/Sonnet tiers priced differently return null.
+function rateFor(model: string | null): Rate | null {
+  if (!model) return null;
+  const m = model.toLowerCase().replace(/\[[^\]]*\]/g, "").replace(/-\d{8}$/, "");
+  if (/opus-4-[5678]/.test(m)) return OPUS;
+  if (/sonnet-(5|4-[56])/.test(m)) return SONNET;
+  if (/haiku-4-5/.test(m)) return HAIKU;
+  if (/(fable|mythos)-5/.test(m)) return FABLE;
+  return null;
+}
+
+// Dollar cost of one turn, or null when the model has no known price.
+function turnCost(turn: Turn): number | null {
+  const r = rateFor(turn.model);
+  if (!r) return null;
+  return (
+    (turn.input * r.input +
+      turn.output * r.output +
+      turn.cacheWrite * r.cacheWrite +
+      turn.cacheRead * r.cacheRead) /
+    1_000_000
+  );
+}
+
 export interface TokenTotals {
   input: number;
   output: number;
@@ -25,6 +76,10 @@ export interface TokenTotals {
   cacheWrite: number;
   total: number;
   turns: number;
+  // Estimated USD across the priced turns only.
+  cost: number;
+  // Turns whose model had no known price, so they contribute tokens but no cost.
+  unpricedTurns: number;
 }
 
 export interface ModelTotals extends TokenTotals {
@@ -85,6 +140,8 @@ export interface StatusInfo {
   requests: number;
   usageAvailable: boolean;
   filesScanned: number;
+  // Human-readable caveats behind the dollar figures.
+  costNote: string;
 }
 
 // One billable request pulled out of a transcript.
@@ -99,7 +156,16 @@ interface Turn {
 }
 
 function emptyTotals(): TokenTotals {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, turns: 0 };
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+    turns: 0,
+    cost: 0,
+    unpricedTurns: 0,
+  };
 }
 
 function addTurn(t: TokenTotals, turn: Turn): TokenTotals {
@@ -109,6 +175,9 @@ function addTurn(t: TokenTotals, turn: Turn): TokenTotals {
   t.cacheWrite += turn.cacheWrite;
   t.total += turn.input + turn.output + turn.cacheRead + turn.cacheWrite;
   t.turns += 1;
+  const cost = turnCost(turn);
+  if (cost === null) t.unpricedTurns += 1;
+  else t.cost += cost;
   return t;
 }
 
@@ -188,6 +257,7 @@ function buildStatus(opts: {
     requests: Math.max(opts.requests, turns.length),
     usageAvailable: turns.length > 0,
     filesScanned: opts.filesScanned,
+    costNote: COST_ASSUMPTIONS,
   };
 }
 
