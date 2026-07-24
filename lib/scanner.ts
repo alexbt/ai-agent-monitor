@@ -42,6 +42,9 @@ export interface AgentInfo {
 export interface SessionInfo {
   id: string;
   project: string;
+  // Claude Code's own LLM-written summary of the session, if it has got round
+  // to generating one. Falls back to firstPrompt for display.
+  title: string | null;
   firstPrompt: string | null;
   gitBranch: string | null;
   cwd: string | null;
@@ -72,6 +75,7 @@ const headerCache = new Map<
   string,
   {
     firstPrompt: string | null;
+    aiTitle: string | null;
     gitBranch: string | null;
     cwd: string | null;
     agentName: string | null;
@@ -84,6 +88,7 @@ function readSessionHeader(filePath: string) {
   if (cached) return cached;
 
   let firstPrompt: string | null = null;
+  let aiTitle: string | null = null;
   let gitBranch: string | null = null;
   let cwd: string | null = null;
   let agentName: string | null = null;
@@ -102,7 +107,20 @@ function readSessionHeader(filePath: string) {
       } catch {
         continue; // last line may be truncated by our fixed-size read
       }
-      if (entry?.type !== "user" || !entry.message) continue;
+
+      // The title is written once the session has something to name, which on
+      // these transcripts lands ~16-20 KB in — inside this read, but after the
+      // first prompt, so the scan can't stop at the prompt any more.
+      if (entry?.type === "ai-title") {
+        if (typeof entry.aiTitle === "string" && entry.aiTitle.trim()) {
+          aiTitle = entry.aiTitle.trim();
+        }
+        continue;
+      }
+
+      if (entry?.type !== "user" || !entry.message || firstPrompt !== null) {
+        continue;
+      }
 
       gitBranch = entry.gitBranch ?? null;
       cwd = entry.cwd ?? null;
@@ -119,14 +137,16 @@ function readSessionHeader(filePath: string) {
       if (firstPrompt) {
         firstPrompt = firstPrompt.replace(/\s+/g, " ").trim().slice(0, 200);
       }
-      break;
     }
   } catch {
     // unreadable file — leave everything null
   }
 
-  const header = { firstPrompt, gitBranch, cwd, agentName, teamName };
+  const header = { firstPrompt, aiTitle, gitBranch, cwd, agentName, teamName };
   // Only cache once we found the prompt; a brand-new session file may not have it yet.
+  // The title deliberately isn't part of that condition — sessions too short to
+  // earn one would re-read their head on every scan forever. A title generated
+  // after this read is picked up by the tail pass instead.
   if (firstPrompt !== null) headerCache.set(filePath, header);
   return header;
 }
@@ -149,20 +169,34 @@ function readTailLines(filePath: string, bytes: number): string[] {
 }
 
 // A session can switch models mid-run (/model), so the model shown is the one
-// from the latest assistant turn. Cached per file+mtime: an idle transcript is
-// read once, an active one only re-read after it grows.
-const modelCache = new Map<string, { mtime: number; model: string | null }>();
+// from the latest assistant turn. The same tail carries the newest ai-title, so
+// both are read in one pass. Cached per file+mtime: an idle transcript is read
+// once, an active one only re-read after it grows.
+const tailCache = new Map<
+  string,
+  { mtime: number; model: string | null; title: string | null }
+>();
 
-function readSessionModel(filePath: string, mtime: number): string | null {
-  const cached = modelCache.get(filePath);
-  if (cached && cached.mtime === mtime) return cached.model;
+function readSessionTail(
+  filePath: string,
+  mtime: number
+): { model: string | null; title: string | null } {
+  const cached = tailCache.get(filePath);
+  if (cached && cached.mtime === mtime) return cached;
 
   let model: string | null = null;
+  let title: string | null = null;
   for (const line of readTailLines(filePath, 64 * 1024)) {
     let entry: any;
     try {
       entry = JSON.parse(line);
     } catch {
+      continue;
+    }
+    if (entry?.type === "ai-title") {
+      if (typeof entry.aiTitle === "string" && entry.aiTitle.trim()) {
+        title = entry.aiTitle.trim();
+      }
       continue;
     }
     if (entry?.type !== "assistant") continue;
@@ -172,10 +206,13 @@ function readSessionModel(filePath: string, mtime: number): string | null {
   }
   // A tail made up entirely of tool results holds no assistant entry — in that
   // case keep the last model we saw rather than flickering back to unknown.
+  // The title is rewritten only every few turns, so it needs the same stickiness.
   if (model === null && cached) model = cached.model;
+  if (title === null && cached) title = cached.title;
 
-  modelCache.set(filePath, { mtime, model });
-  return model;
+  const result = { mtime, model, title };
+  tailCache.set(filePath, result);
+  return result;
 }
 
 // Recent teammate/agent communication events in a session transcript:
@@ -395,16 +432,20 @@ export function scan(): Snapshot {
       const header = readSessionHeader(filePath);
       const agents = scanAgents(path.join(projectPath, sessionId), now);
       const lastActivity = Math.max(mtime, ...agents.map((a) => a.lastActivity));
+      const tail = readSessionTail(filePath, mtime);
 
       sessions.push({
         id: sessionId,
         project: projectDir.name,
+        // The tail's title is the fresher of the two; the header's covers long
+        // sessions whose recent tail happens to hold no ai-title record.
+        title: tail.title ?? header.aiTitle,
         firstPrompt: header.firstPrompt,
         gitBranch: header.gitBranch,
         cwd: header.cwd,
         agentName: header.agentName,
         teamName: header.teamName,
-        model: readSessionModel(filePath, mtime),
+        model: tail.model,
         startedAt: birth,
         lastActivity,
         active: now - lastActivity < ACTIVE_WINDOW_MS,

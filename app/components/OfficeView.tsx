@@ -11,6 +11,7 @@ import {
   modelLabel,
   type Provider,
 } from "@/lib/useSnapshot";
+import { usePrompts, useViewMode, type Prompt } from "@/lib/usePrompts";
 import SessionTrace from "./SessionTrace";
 
 const MAX_DESKS = 12;
@@ -30,14 +31,13 @@ interface DeskOccupant {
   toMain: string | null; // occupant → main
 }
 
-function sessionLabel(s: SessionInfo, maxPrompt = 48): string {
-  return (
-    s.agentName ??
-    (s.firstPrompt
-      ? s.firstPrompt.slice(0, maxPrompt) +
-        (s.firstPrompt.length > maxPrompt ? "…" : "")
-      : shortId(s.id))
-  );
+// Full text on purpose: the dropdown wraps it and the closed toggle clips with
+// an ellipsis at whatever width it actually has, which beats guessing a
+// character count that was cutting titles short.
+function sessionLabel(s: SessionInfo): string {
+  // Claude Code's own title when it has written one — it stays accurate for a
+  // long session in a way the opening prompt does not.
+  return s.agentName ?? s.title ?? s.firstPrompt ?? shortId(s.id);
 }
 
 function runningTime(
@@ -49,6 +49,100 @@ function runningTime(
   return active
     ? `⏱ ${fmtDuration(now - startedAt)}`
     : `ran ${fmtDuration(Math.max(0, lastActivity - startedAt))}`;
+}
+
+// In prompts mode the picker lists every prompt of every session rather than
+// one entry per session; choosing one selects its session and points the
+// trace at that turn.
+interface PromptChoice {
+  session: SessionInfo & { projectName: string };
+  prompt: Prompt;
+  total: number;
+}
+
+function PromptDropdown({
+  choices,
+  selected,
+  onSelect,
+  now,
+}: {
+  choices: PromptChoice[];
+  selected: PromptChoice | null;
+  onSelect: (c: PromptChoice) => void;
+  now: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+
+  const sub = (c: PromptChoice) =>
+    `${c.session.projectName.split("/").pop()} · ${shortId(c.session.id)} · prompt ${c.prompt.n}/${c.total} · ${timeAgo(c.prompt.ts || c.session.lastActivity, now)}`;
+
+  return (
+    <div className="dropdown" ref={ref}>
+      <button
+        className="dropdown-toggle"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className={`dot ${selected?.session.active ? "on" : ""}`} />
+        <span className="dropdown-text">
+          <span className="dropdown-label" title={selected?.prompt.text}>
+            {selected ? selected.prompt.text : "No prompts found"}
+          </span>
+          {selected && <span className="dropdown-sub">{sub(selected)}</span>}
+        </span>
+        <span className="dropdown-caret">▾</span>
+      </button>
+      {open && choices.length > 0 && (
+        <ul className="dropdown-menu" role="listbox">
+          {choices.map((c) => {
+            const key = `${c.session.id}#${c.prompt.n}`;
+            const isSel =
+              selected != null &&
+              selected.session.id === c.session.id &&
+              selected.prompt.n === c.prompt.n;
+            return (
+              <li key={key}>
+                <button
+                  role="option"
+                  aria-selected={isSel}
+                  className={`dropdown-item ${isSel ? "selected" : ""}`}
+                  onClick={() => {
+                    onSelect(c);
+                    setOpen(false);
+                  }}
+                  title={c.prompt.text}
+                >
+                  <span className={`dot ${c.session.active ? "on" : ""}`} />
+                  <span className="dropdown-text">
+                    <span className="dropdown-label">{c.prompt.text}</span>
+                    <span className="dropdown-sub">{sub(c)}</span>
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function SessionDropdown({
@@ -90,12 +184,14 @@ function SessionDropdown({
         aria-expanded={open}
       >
         <span className={`dot ${selected.active ? "on" : ""}`} />
-        <span className="dropdown-label">{sessionLabel(selected)}</span>
-        <span className="dropdown-sub">
-          {selected.projectName.split("/").pop()} ·{" "}
-          {selected.active
-            ? "active now"
-            : `active ${timeAgo(selected.lastActivity, now)}`}
+        <span className="dropdown-text">
+          <span className="dropdown-label">{sessionLabel(selected)}</span>
+          <span className="dropdown-sub">
+            {selected.projectName.split("/").pop()} ·{" "}
+            {selected.active
+              ? "active now"
+              : `active ${timeAgo(selected.lastActivity, now)}`}
+          </span>
         </span>
         <span className="dropdown-caret">▾</span>
       </button>
@@ -111,13 +207,19 @@ function SessionDropdown({
                   onSelect(s.id);
                   setOpen(false);
                 }}
-                title={s.firstPrompt ?? s.id}
+                title={
+                  [s.title, s.firstPrompt].filter(Boolean).join("\n") || s.id
+                }
               >
                 <span className={`dot ${s.active ? "on" : ""}`} />
-                <span className="dropdown-label">{sessionLabel(s)}</span>
-                <span className="dropdown-sub">
-                  {s.projectName.split("/").pop()} ·{" "}
-                  {s.active ? "active now" : `active ${timeAgo(s.lastActivity, now)}`}
+                <span className="dropdown-text">
+                  <span className="dropdown-label">{sessionLabel(s)}</span>
+                  <span className="dropdown-sub">
+                    {s.projectName.split("/").pop()} ·{" "}
+                    {s.active
+                      ? "active now"
+                      : `active ${timeAgo(s.lastActivity, now)}`}
+                  </span>
                 </span>
               </button>
             </li>
@@ -381,11 +483,21 @@ function latestComm(
 export default function OfficeView({ provider }: { provider: Provider }) {
   const { snapshot, connected, now } = useSnapshot(1000, provider);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mode, setMode] = useViewMode();
+  const { prompts } = usePrompts(provider, mode === "prompts");
+  // Which prompt the picker is pointing at, as "<sessionId>#<n>".
+  const [selectedPrompt, setSelectedPrompt] = useState<string | null>(null);
 
-  // Focus the session named in ?session=… when arriving from the Session Log.
+  // Focus what ?session=… (and optionally &prompt=…) names when arriving from
+  // the Session Log. The prompt row links carry both, so the picker lands on
+  // the exact turn you clicked rather than just its session.
   useEffect(() => {
-    const id = new URLSearchParams(window.location.search).get("session");
-    if (id) setSelectedId(id);
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("session");
+    if (!id) return;
+    setSelectedId(id);
+    const n = params.get("prompt");
+    if (n) setSelectedPrompt(`${id}#${n}`);
   }, []);
 
   // Where the "Log" button links back to for this provider.
@@ -396,7 +508,47 @@ export default function OfficeView({ provider }: { provider: Provider }) {
   ).flatMap((p) => p.sessions.map((s) => ({ ...s, projectName: p.displayName })));
   sessions.sort((a, b) => b.lastActivity - a.lastActivity);
 
-  const selected = sessions.find((s) => s.id === selectedId) ?? sessions[0] ?? null;
+  const promptChoices: PromptChoice[] =
+    mode === "prompts"
+      ? sessions
+          .flatMap((s) => {
+            const list = prompts[s.id] ?? [];
+            return list.map((pr) => ({
+              session: s,
+              prompt: pr,
+              total: list.length,
+            }));
+          })
+          .sort(
+            (a, b) =>
+              (b.prompt.ts || b.session.lastActivity) -
+              (a.prompt.ts || a.session.lastActivity)
+          )
+      : [];
+
+  // promptChoices is newest-first, so finding by session id yields that
+  // session's latest prompt. That fallback matters when a session is picked
+  // without a prompt — arriving from the Session Log's Office button, or
+  // switching over from Sessions mode — since otherwise the global newest
+  // prompt would win and quietly discard the session you asked for.
+  const selectedChoice =
+    mode === "prompts"
+      ? (promptChoices.find(
+          (c) => `${c.session.id}#${c.prompt.n}` === selectedPrompt
+        ) ??
+        (selectedId
+          ? promptChoices.find((c) => c.session.id === selectedId)
+          : null) ??
+        promptChoices[0] ??
+        null)
+      : null;
+
+  // In prompts mode the chosen prompt decides which session the office shows.
+  const selected =
+    selectedChoice?.session ??
+    sessions.find((s) => s.id === selectedId) ??
+    sessions[0] ??
+    null;
 
   let desks: DeskOccupant[] = [];
   if (selected) {
@@ -454,10 +606,32 @@ export default function OfficeView({ provider }: { provider: Provider }) {
         <h1>
           Office View <span className="provider-tag">{provider}</span>
         </h1>
-        <span className={`conn ${connected ? "ok" : "down"}`}>
-          <span className="dot" />
-          {connected ? "live" : "reconnecting…"}
-        </span>
+        <div className="header-right">
+          <div className="seg" role="group" aria-label="List mode">
+            {(["prompts", "sessions"] as const).map((m) => (
+              <button
+                key={m}
+                className={`seg-btn ${mode === m ? "on" : ""}`}
+                aria-pressed={mode === m}
+                onClick={() => {
+                  setMode(m);
+                  setSelectedPrompt(null);
+                }}
+                title={
+                  m === "sessions"
+                    ? "Pick a session"
+                    : "Pick an individual prompt — the office shows the session it belongs to"
+                }
+              >
+                {m === "sessions" ? "Sessions" : "Prompts"}
+              </button>
+            ))}
+          </div>
+          <span className={`conn ${connected ? "ok" : "down"}`}>
+            <span className="dot" />
+            {connected ? "live" : "reconnecting…"}
+          </span>
+        </div>
       </header>
 
       {!snapshot && <p className="empty">Loading sessions…</p>}
@@ -465,16 +639,31 @@ export default function OfficeView({ provider }: { provider: Provider }) {
       {sessions.length > 0 && selected && (
         <>
           <div className="session-picker">
-            <label>Session</label>
-            <SessionDropdown
-              sessions={sessions}
-              selected={selected}
-              onSelect={setSelectedId}
-              now={now}
-            />
+            {mode === "prompts" ? (
+              <PromptDropdown
+                choices={promptChoices}
+                selected={selectedChoice}
+                onSelect={(c) => {
+                  setSelectedPrompt(`${c.session.id}#${c.prompt.n}`);
+                  setSelectedId(c.session.id);
+                }}
+                now={now}
+              />
+            ) : (
+              <SessionDropdown
+                sessions={sessions}
+                selected={selected}
+                onSelect={setSelectedId}
+                now={now}
+              />
+            )}
             <Link
               className="nav-btn"
-              href={`${logHref}?session=${encodeURIComponent(selected.id)}`}
+              href={`${logHref}?session=${encodeURIComponent(selected.id)}${
+                selectedChoice?.session.id === selected.id
+                  ? `&prompt=${selectedChoice.prompt.n}`
+                  : ""
+              }`}
               title="Open this session in the Session Log"
             >
               ☰ Log
@@ -513,13 +702,22 @@ export default function OfficeView({ provider }: { provider: Provider }) {
                 now
               )}
               mainActive={selected.active}
-              mainTitle={selected.firstPrompt ?? selected.id}
+              mainTitle={
+                [selected.title, selected.firstPrompt]
+                  .filter(Boolean)
+                  .join("\n") || selected.id
+              }
               desks={desks}
             />
             <SessionTrace
               project={selected.project}
               sessionId={selected.id}
               provider={provider}
+              focusText={
+                selectedChoice?.session.id === selected.id
+                  ? selectedChoice.prompt.text
+                  : null
+              }
             />
           </div>
         </>
