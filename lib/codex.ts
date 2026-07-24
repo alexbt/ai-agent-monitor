@@ -133,7 +133,7 @@ function readLatestModel(filePath: string, mtime: number, fallback: string | nul
   return model;
 }
 
-function listRolloutFiles(dir = SESSIONS_DIR, depth = 0): string[] {
+export function listRolloutFiles(dir = SESSIONS_DIR, depth = 0): string[] {
   if (depth > 4) return [];
   let entries: fs.Dirent[];
   try {

@@ -7,15 +7,17 @@ const groups = [
   {
     title: "Claude",
     items: [
-      { href: "/", label: "Session Log", icon: "☰" },
       { href: "/visual", label: "Office View", icon: "🏢" },
+      { href: "/claude", label: "Session Log", icon: "☰" },
+      { href: "/status", label: "Status", icon: "📊" },
     ],
   },
   {
     title: "Codex",
     items: [
-      { href: "/codex", label: "Session Log", icon: "☰" },
       { href: "/codex/visual", label: "Office View", icon: "🏢" },
+      { href: "/codex", label: "Session Log", icon: "☰" },
+      { href: "/codex/status", label: "Status", icon: "📊" },
     ],
   },
 ];
