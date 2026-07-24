@@ -257,6 +257,11 @@ h2 {
   color: var(--accent);
 }
 
+.badge.model {
+  color: var(--text);
+  border-color: #3d4450;
+}
+
 .time {
   margin-left: auto;
   white-space: nowrap;

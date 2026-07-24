@@ -47,6 +47,7 @@ export interface SessionInfo {
   cwd: string | null;
   agentName: string | null; // set when this session IS a named teammate agent
   teamName: string | null; // "session-<shortid>" of the spawning session
+  model: string | null; // model of the most recent assistant turn
   startedAt: number;
   lastActivity: number;
   active: boolean;
@@ -145,6 +146,36 @@ function readTailLines(filePath: string, bytes: number): string[] {
   } catch {
     return [];
   }
+}
+
+// A session can switch models mid-run (/model), so the model shown is the one
+// from the latest assistant turn. Cached per file+mtime: an idle transcript is
+// read once, an active one only re-read after it grows.
+const modelCache = new Map<string, { mtime: number; model: string | null }>();
+
+function readSessionModel(filePath: string, mtime: number): string | null {
+  const cached = modelCache.get(filePath);
+  if (cached && cached.mtime === mtime) return cached.model;
+
+  let model: string | null = null;
+  for (const line of readTailLines(filePath, 64 * 1024)) {
+    let entry: any;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry?.type !== "assistant") continue;
+    const m = entry.message?.model;
+    // "<synthetic>" marks locally-generated messages (API errors, notices)
+    if (typeof m === "string" && m && m !== "<synthetic>") model = m;
+  }
+  // A tail made up entirely of tool results holds no assistant entry — in that
+  // case keep the last model we saw rather than flickering back to unknown.
+  if (model === null && cached) model = cached.model;
+
+  modelCache.set(filePath, { mtime, model });
+  return model;
 }
 
 // Recent teammate/agent communication events in a session transcript:
@@ -373,6 +404,7 @@ export function scan(): Snapshot {
         cwd: header.cwd,
         agentName: header.agentName,
         teamName: header.teamName,
+        model: readSessionModel(filePath, mtime),
         startedAt: birth,
         lastActivity,
         active: now - lastActivity < ACTIVE_WINDOW_MS,

@@ -39,16 +39,24 @@ function threadTitles(): Map<string, string> {
   return titles;
 }
 
-// cwd / first prompt never change once written — cache per file
-const headerCache = new Map<string, { id: string; cwd: string | null; prompt: string | null }>();
+interface CodexHeader {
+  id: string;
+  cwd: string | null;
+  prompt: string | null;
+  model: string | null;
+}
 
-function readHeader(filePath: string): { id: string; cwd: string | null; prompt: string | null } | null {
+// cwd / first prompt never change once written — cache per file
+const headerCache = new Map<string, CodexHeader>();
+
+function readHeader(filePath: string): CodexHeader | null {
   const cached = headerCache.get(filePath);
   if (cached) return cached;
 
   let id: string | null = null;
   let cwd: string | null = null;
   let prompt: string | null = null;
+  let model: string | null = null;
   try {
     const fd = fs.openSync(filePath, "r");
     const buf = Buffer.alloc(64 * 1024);
@@ -64,10 +72,15 @@ function readHeader(filePath: string): { id: string; cwd: string | null; prompt:
       if (entry?.type === "session_meta") {
         id = entry.payload?.id ?? null;
         cwd = entry.payload?.cwd ?? null;
+        model = entry.payload?.model ?? model;
+      } else if (entry?.type === "turn_context") {
+        // each turn records the model it ran with
+        model = entry.payload?.model ?? model;
       } else if (entry?.type === "event_msg" && entry.payload?.type === "user_message") {
-        prompt = String(entry.payload.message ?? "").replace(/\s+/g, " ").trim().slice(0, 200) || null;
-        break;
+        prompt ??=
+          String(entry.payload.message ?? "").replace(/\s+/g, " ").trim().slice(0, 200) || null;
       }
+      if (prompt !== null && model !== null) break;
     }
   } catch {
     return null;
@@ -77,9 +90,47 @@ function readHeader(filePath: string): { id: string; cwd: string | null; prompt:
   }
   if (!id) return null;
 
-  const header = { id, cwd, prompt };
+  const header = { id, cwd, prompt, model };
   if (prompt !== null) headerCache.set(filePath, header);
   return header;
+}
+
+// The model can be switched mid-session, so the header's first turn_context is
+// only a starting point — the newest one in the tail wins.
+const modelCache = new Map<string, { mtime: number; model: string | null }>();
+
+function readLatestModel(filePath: string, mtime: number, fallback: string | null): string | null {
+  const cached = modelCache.get(filePath);
+  if (cached && cached.mtime === mtime) return cached.model;
+
+  let model: string | null = null;
+  try {
+    const stat = fs.statSync(filePath);
+    const size = Math.min(64 * 1024, stat.size);
+    const start = stat.size - size;
+    const fd = fs.openSync(filePath, "r");
+    const buf = Buffer.alloc(size);
+    const read = fs.readSync(fd, buf, 0, size, start);
+    fs.closeSync(fd);
+    const lines = buf.toString("utf8", 0, read).split("\n");
+    if (start > 0) lines.shift(); // first line is almost certainly truncated
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry?.type === "turn_context" && entry.payload?.model) {
+          model = String(entry.payload.model);
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    // unreadable — fall through to the header value
+  }
+
+  model ??= cached?.model ?? fallback;
+  modelCache.set(filePath, { mtime, model });
+  return model;
 }
 
 function listRolloutFiles(dir = SESSIONS_DIR, depth = 0): string[] {
@@ -125,6 +176,7 @@ export function scanCodex(): Snapshot {
       cwd,
       agentName: null,
       teamName: null,
+      model: readLatestModel(filePath, mtime, header.model),
       startedAt: st.birthtimeMs || mtime,
       lastActivity: mtime,
       active: now - mtime < ACTIVE_WINDOW_MS,

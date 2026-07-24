@@ -7,6 +7,7 @@ import {
   timeAgo,
   shortId,
   fmtDuration,
+  modelLabel,
   type Provider,
 } from "@/lib/useSnapshot";
 import SessionTrace from "./SessionTrace";
@@ -467,6 +468,11 @@ export default function OfficeView({ provider }: { provider: Provider }) {
             <div className="office-title">
               <span className="mono">{shortId(selected.id)}</span>
               <span>{selected.projectName}</span>
+              {selected.model && (
+                <span className="badge model" title={selected.model}>
+                  {modelLabel(selected.model)}
+                </span>
+              )}
               {selected.gitBranch && <span className="badge">{selected.gitBranch}</span>}
               <span className="legend">
                 <span className="legend-item out">→ main to agent</span>

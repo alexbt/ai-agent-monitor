@@ -2,7 +2,13 @@
 
 import { useState } from "react";
 import type { SessionInfo, AgentInfo } from "@/lib/scanner";
-import { useSnapshot, timeAgo, shortId, type Provider } from "@/lib/useSnapshot";
+import {
+  useSnapshot,
+  timeAgo,
+  shortId,
+  modelLabel,
+  type Provider,
+} from "@/lib/useSnapshot";
 import SessionTrace from "./SessionTrace";
 
 function AgentRow({ agent, now }: { agent: AgentInfo; now: number }) {
@@ -46,6 +52,11 @@ function SessionCard({
       </div>
       <div className="session-meta">
         <span className="mono">{shortId(session.id)}</span>
+        {session.model && (
+          <span className="badge model" title={session.model}>
+            {modelLabel(session.model)}
+          </span>
+        )}
         {session.gitBranch && <span className="badge">{session.gitBranch}</span>}
         <span className="time">{timeAgo(session.lastActivity, now)}</span>
         {session.agents.length > 0 && (

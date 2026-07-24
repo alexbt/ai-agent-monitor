@@ -48,3 +48,9 @@ export function timeAgo(ts: number, now: number): string {
 export function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
+
+// "claude-opus-4-8" → "opus-4-8", "gpt-5-codex" → "gpt-5-codex".
+// The vendor prefix and trailing release date are noise in a badge.
+export function modelLabel(model: string): string {
+  return model.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+}
