@@ -171,6 +171,8 @@ export function scanCodex(): Snapshot {
     const session: SessionInfo = {
       id: header.id,
       project: cwd,
+      // Codex writes no LLM-generated title, so sessions fall back to the prompt.
+      title: null,
       firstPrompt: titles.get(header.id) ?? header.prompt,
       gitBranch: null,
       cwd,

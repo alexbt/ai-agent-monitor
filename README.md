@@ -76,6 +76,14 @@ Without make: `npm install`, then `npm run dev`.
 ## Notes & limitations
 
 - Activity is inferred from file writes: a session idle at the prompt (waiting for user input) shows as **inactive** after ~60 seconds even though its process is alive.
+- **Session titles** come from the `ai-title` record Claude Code writes into its own transcript (`{"type":"ai-title","aiTitle":…}`) — a short LLM-written summary of what the session is about, which beats labelling a multi-hour session by whatever was typed first. The opening prompt is still shown, on a second line beneath the title.
+
+  It's read from both ends of the file, no extra I/O: the tail pass that already tracks the model takes the newest one, and the header read covers long sessions whose last 64 KB happens to contain none (the record repeats only every few turns — as little as once per 64 KB on the transcripts here). Whichever is found is sticky, so the title can't flicker back to unknown. Sessions ending before Claude Code generates a title, and all Codex sessions (no equivalent record), keep falling back to the first prompt.
+- **Prompts / Sessions mode** — a toggle in the header of both views, defaulting to Prompts. A session is a sequence of many prompts, and labelling it by its first one goes stale fast, so Prompts mode breaks the list apart: one row per prompt, newest first, tagged `n/total` with the session it belongs to. Picking one opens that session's trace scrolled to that exact turn. Sessions mode is the one-row-per-session view. The choice is remembered and shared by both views.
+
+  Only prompts you actually typed are listed. Claude Code marks them with `promptSource: "typed"`, which separates them from the background-task reports, hook output and slash-command wrappers that arrive through the same `user` channel (on this machine, a third of them). Older transcripts predate that field, so they fall back to filtering on the wrapping tag.
+
+  Prompts come from `/api/prompts`, not from the 2-second snapshot scan: collecting them means walking a transcript end to end, while the scanners only ever read a 64 KB head and tail. `lib/prompts.ts` parses each file incrementally — transcripts are append-only, so only bytes added since the last pass are re-read — and it only runs while you are in Prompts mode.
 - Communication arrows and labels come from transcript tails within a ~90-second window — they visualize recent flow, not the full message history (the trace panel has that).
 - The office view shows up to 12 desks per session; extras are counted below the scene.
 - Codex sessions are single-agent (no subagent transcripts), so their Office View shows the main agent working alone; traces and activity work the same as for Claude.

@@ -310,6 +310,16 @@ h2 {
   white-space: nowrap;
 }
 
+/* The opening prompt, kept under the generated title it no longer supplies. */
+.session-subprompt {
+  margin: 4px 0 0 18px;
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-meta {
   display: flex;
   align-items: center;
@@ -339,6 +349,72 @@ h2 {
 .badge.model {
   color: var(--text);
   border-color: #3d4450;
+}
+
+/* --- prompts mode --- */
+
+.prompt-row {
+  padding: 9px 14px;
+}
+
+.prompt-n {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 7px;
+  flex-shrink: 0;
+}
+
+.prompt-row .session-prompt {
+  font-weight: 400;
+}
+
+h2 .section-count {
+  float: right;
+  font-weight: 400;
+  color: var(--gray);
+}
+
+/* the turn the picked prompt resolved to, inside the trace */
+.trace-item.focused {
+  background: rgba(217, 119, 87, 0.14);
+  outline: 1px solid var(--accent);
+  border-radius: 4px;
+}
+
+/* --- segmented filter --- */
+
+.seg {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.seg-btn {
+  background: var(--panel);
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.seg-btn + .seg-btn {
+  border-left: 1px solid var(--border);
+}
+
+.seg-btn:hover {
+  color: var(--text);
+}
+
+.seg-btn.on {
+  background: var(--panel-2);
+  color: var(--text);
 }
 
 /* --- status page --- */
@@ -611,14 +687,16 @@ h2 {
 
 .session-picker {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   margin-bottom: 18px;
 }
 
-.session-picker label {
-  color: var(--text-dim);
-  font-size: 13px;
+/* Pushed to the content's right edge so it lines up with the panels below,
+   independently of how wide the dropdown next to it ends up. */
+.session-picker .nav-btn {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 /* the same green "active" dot used on the Session Log list */
@@ -628,16 +706,18 @@ h2 {
   animation: pulse 1.6s ease-in-out infinite;
 }
 
+/* Uncapped on purpose: it takes every pixel left over after the Log button,
+   which keeps its own place at the column's right edge. */
 .dropdown {
   position: relative;
   flex: 1;
-  max-width: 620px;
+  min-width: 0; /* let it yield space rather than push the Log button out */
 }
 
 .dropdown-toggle,
 .dropdown-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   width: 100%;
   background: var(--panel);
@@ -651,9 +731,26 @@ h2 {
   text-align: left;
 }
 
+/* The dot sits on the first line of text rather than centred on the block. */
+.dropdown-toggle > .dot,
+.dropdown-item > .dot {
+  margin-top: 5px;
+}
+
 .dropdown-toggle:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+/* Label stacked over its metadata: on one row the metadata never shrinks, so
+   it was taking the width the prompt text needed. min-width:0 lets the label
+   clip inside the flex row instead of forcing the row wider. */
+.dropdown-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
 }
 
 .dropdown-label {
@@ -662,20 +759,34 @@ h2 {
   white-space: nowrap;
 }
 
+/* Open menu: no ellipsis, wrap to a few lines so long titles are readable. */
+.dropdown-item .dropdown-label {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  line-height: 1.35;
+}
+
 .dropdown-sub {
-  margin-left: auto;
   color: var(--text-dim);
   font-size: 11px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   white-space: nowrap;
-  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dropdown-caret {
   color: var(--text-dim);
   flex-shrink: 0;
+  margin-top: 2px; /* optically level with the label, not the stacked block */
 }
 
+/* Matches the toggle, which is now wide enough on its own — going wider would
+   spill past the right edge of the content column. */
 .dropdown-menu {
   position: absolute;
   top: calc(100% + 4px);
