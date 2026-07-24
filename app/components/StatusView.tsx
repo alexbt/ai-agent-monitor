@@ -12,6 +12,13 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
+function fmtCost(n: number): string {
+  if (n === 0) return "$0.00";
+  if (n < 0.01) return "<$0.01";
+  if (n >= 1000) return `$${(n / 1000).toFixed(1)}K`;
+  return `$${n.toFixed(2)}`;
+}
+
 function fmtClock(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -59,6 +66,30 @@ function QuotaBar({ percent }: { percent: number }) {
   );
 }
 
+// A "—" cost with the count of turns we couldn't price, for the tooltip.
+function costCell(totals: TokenTotals) {
+  if (totals.unpricedTurns > 0 && totals.cost === 0) {
+    return (
+      <td className="num" title={`${totals.unpricedTurns} unpriced request(s)`}>
+        —
+      </td>
+    );
+  }
+  const suffix =
+    totals.unpricedTurns > 0
+      ? ` (+${totals.unpricedTurns} unpriced)`
+      : "";
+  return (
+    <td
+      className="num strong cost"
+      title={`${fmtCost(totals.cost)}${suffix}`}
+    >
+      {fmtCost(totals.cost)}
+      {totals.unpricedTurns > 0 && <span className="cost-flag">*</span>}
+    </td>
+  );
+}
+
 function TotalsRow({ label, totals }: { label: string; totals: TokenTotals }) {
   return (
     <tr>
@@ -68,7 +99,8 @@ function TotalsRow({ label, totals }: { label: string; totals: TokenTotals }) {
       <td className="num">{fmtTokens(totals.output)}</td>
       <td className="num">{fmtTokens(totals.cacheWrite)}</td>
       <td className="num">{fmtTokens(totals.cacheRead)}</td>
-      <td className="num strong">{fmtTokens(totals.total)}</td>
+      <td className="num">{fmtTokens(totals.total)}</td>
+      {costCell(totals)}
     </tr>
   );
 }
@@ -84,7 +116,8 @@ function ModelRow({ row }: { row: ModelTotals }) {
       <td className="num">{fmtTokens(row.output)}</td>
       <td className="num">{fmtTokens(row.cacheWrite)}</td>
       <td className="num">{fmtTokens(row.cacheRead)}</td>
-      <td className="num strong">{fmtTokens(row.total)}</td>
+      <td className="num">{fmtTokens(row.total)}</td>
+      {costCell(row)}
     </tr>
   );
 }
@@ -278,6 +311,24 @@ export default function StatusView({ provider }: { provider: Provider }) {
                 <div className="tile-value dim">no activity</div>
               )}
             </div>
+
+            <div className="tile">
+              <div className="tile-label">Estimated spend</div>
+              <div className="tile-value">
+                {fmtCost(status.sevenDay.cost)}
+                <span className="unit">7d</span>
+              </div>
+              <div className="tile-sub">
+                {fmtCost(status.today.cost)} today
+                {win ? ` · ${fmtCost(win.totals.cost)} this window` : ""}
+              </div>
+              <div className="tile-note">
+                {status.sevenDay.unpricedTurns > 0
+                  ? `Excludes ${status.sevenDay.unpricedTurns.toLocaleString()} request(s) on unpriced models. `
+                  : ""}
+                {status.costNote}
+              </div>
+            </div>
           </div>
 
           <section>
@@ -301,6 +352,7 @@ export default function StatusView({ provider }: { provider: Provider }) {
                     <th className="num">Cache write</th>
                     <th className="num">Cache read</th>
                     <th className="num">Total</th>
+                    <th className="num">Est. cost</th>
                   </tr>
                 </thead>
                 <tbody>
