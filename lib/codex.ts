@@ -1,7 +1,21 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import type { Snapshot, ProjectInfo, SessionInfo, TraceItem } from "./scanner";
+import type {
+  Snapshot,
+  ProjectInfo,
+  SessionInfo,
+  ToolDetail,
+  TraceItem,
+} from "./scanner";
+import {
+  MAX_SUMMARY,
+  MAX_TEXT,
+  detailSummary,
+  inputDetail,
+  resultDetail,
+  toolSummary,
+} from "./traceDetail";
 
 const CODEX_DIR = path.join(os.homedir(), ".codex");
 const SESSIONS_DIR = path.join(CODEX_DIR, "sessions");
@@ -219,48 +233,99 @@ export function codexSessionPath(id: string): string | null {
   return pathById.get(id) ?? null;
 }
 
-// Parse rollout lines into the same TraceItem shape the Claude trace uses.
-export function codexLinesToItems(lines: string[]): TraceItem[] {
-  const items: TraceItem[] = [];
-  for (const line of lines) {
-    let entry: any;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (entry?.type !== "response_item") continue;
-    const p = entry.payload;
-    if (!p) continue;
-    const ts = entry.timestamp ? Date.parse(entry.timestamp) : 0;
+// Codex writes tool arguments and output as JSON strings; unwrap them so the
+// shared detail formatter sees objects rather than one escaped line.
+function parseMaybeJson(v: unknown): unknown {
+  if (typeof v !== "string") return v;
+  const s = v.trim();
+  if (!s.startsWith("{") && !s.startsWith("[")) return v;
+  try {
+    return JSON.parse(s);
+  } catch {
+    return v;
+  }
+}
 
-    if (p.type === "message") {
-      // system/developer-injected context also appears as messages — skip it
-      if (p.role !== "user" && p.role !== "assistant") continue;
-      const text = (Array.isArray(p.content) ? p.content : [])
-        .map((c: any) => c?.text ?? "")
-        .join("\n")
-        .trim();
-      if (!text || /^<(permissions|environment_context|user_instructions)/.test(text)) {
-        continue;
-      }
-      items.push({
-        kind: p.role === "user" ? "user" : "assistant",
-        text: text.slice(0, 4000),
-        ts,
+// A shell call's output arrives as { output, metadata: { exit_code, … } }.
+function codexResultDetail(output: unknown): ToolDetail | undefined {
+  const parsed = parseMaybeJson(output);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const o = parsed as Record<string, any>;
+    if (typeof o.output === "string") {
+      const exit = Number(o.metadata?.exit_code ?? 0);
+      return resultDetail({
+        stdout: exit === 0 ? o.output : "",
+        stderr: exit === 0 ? "" : o.output,
+        interrupted: o.metadata?.interrupted === true,
       });
-    } else if (p.type === "function_call") {
-      items.push({
-        kind: "tool",
-        name: p.name ?? "tool",
-        text: String(p.arguments ?? "").slice(0, 600),
-        ts,
-      });
-    } else if (p.type === "function_call_output") {
-      const out = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? "");
-      const text = out.replace(/\s+/g, " ").trim();
-      if (text) items.push({ kind: "tool_result", text: text.slice(0, 600), ts });
     }
   }
-  return items;
+  return resultDetail(parsed);
+}
+
+// Parse rollout lines into the same TraceItem shape the Claude trace uses.
+// Stateful (it pairs outputs back to the call that produced them), so callers
+// take a fresh parser per connection.
+export function makeCodexParser(): (lines: string[]) => TraceItem[] {
+  const toolNames = new Map<string, string>();
+
+  return (lines: string[]): TraceItem[] => {
+    const items: TraceItem[] = [];
+    for (const line of lines) {
+      let entry: any;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (entry?.type !== "response_item") continue;
+      const p = entry.payload;
+      if (!p) continue;
+      const ts = entry.timestamp ? Date.parse(entry.timestamp) : 0;
+
+      if (p.type === "message") {
+        // system/developer-injected context also appears as messages — skip it
+        if (p.role !== "user" && p.role !== "assistant") continue;
+        const text = (Array.isArray(p.content) ? p.content : [])
+          .map((c: any) => c?.text ?? "")
+          .join("\n")
+          .trim();
+        if (!text || /^<(permissions|environment_context|user_instructions)/.test(text)) {
+          continue;
+        }
+        items.push({
+          kind: p.role === "user" ? "user" : "assistant",
+          text: text.slice(0, MAX_TEXT),
+          ts,
+        });
+      } else if (p.type === "function_call") {
+        const name = p.name ?? "tool";
+        if (p.call_id) toolNames.set(String(p.call_id), name);
+        const input = parseMaybeJson(p.arguments);
+        const summary = toolSummary(input).slice(0, MAX_SUMMARY);
+        const detail = inputDetail(input, summary);
+        items.push({
+          kind: "tool",
+          name,
+          text: summary,
+          ts,
+          ...(detail ? { detail } : {}),
+        });
+      } else if (p.type === "function_call_output") {
+        const detail = codexResultDetail(p.output);
+        const text = detail
+          ? detailSummary(detail).slice(0, MAX_SUMMARY)
+          : String(p.output ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_SUMMARY);
+        if (!text && !detail) continue;
+        items.push({
+          kind: "tool_result",
+          name: toolNames.get(String(p.call_id)),
+          text,
+          ts,
+          ...(detail ? { detail } : {}),
+        });
+      }
+    }
+    return items;
+  };
 }
