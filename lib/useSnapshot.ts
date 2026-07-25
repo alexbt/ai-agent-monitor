@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Snapshot } from "@/lib/scanner";
+import type { SessionInfo, Snapshot } from "@/lib/scanner";
 
 export type Provider = "claude" | "codex";
 
@@ -47,6 +47,13 @@ export function timeAgo(ts: number, now: number): string {
 
 export function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
+}
+
+// What to call a session in a list. Claude Code's own title when it has written
+// one — it stays accurate for a long session in a way the opening prompt does
+// not — then the opening prompt, then the id as a last resort.
+export function sessionLabel(s: SessionInfo): string {
+  return s.agentName ?? s.title ?? s.firstPrompt ?? shortId(s.id);
 }
 
 // "claude-opus-4-8" → "opus-4-8", "gpt-5-codex" → "gpt-5-codex".

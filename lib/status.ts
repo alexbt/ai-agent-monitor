@@ -19,20 +19,27 @@ const LOOKBACK_MS = 7 * DAY_MS;
 const MAX_READ_BYTES = 8 * 1024 * 1024;
 
 // First-party Anthropic list prices, USD per million tokens. cacheRead is 0.1x
-// input and cacheWrite is 1.25x input (5-minute-TTL rate) per Anthropic's
-// published caching multipliers — see COST_ASSUMPTIONS below for the caveats.
-// Only Claude models are priced; anything not matched here (Codex/OpenAI models,
+// input; cache writes are billed by TTL — 1.25x input for the 5-minute cache and
+// 2x for the 1-hour one, per Anthropic's published caching multipliers. Only
+// Claude models are priced; anything not matched here (Codex/OpenAI models,
 // retired Opus/Sonnet tiers with different rates) is left unpriced rather than
 // guessed at.
 interface Rate {
   input: number;
   output: number;
-  cacheWrite: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
   cacheRead: number;
 }
 
 function rate(input: number, output: number): Rate {
-  return { input, output, cacheWrite: input * 1.25, cacheRead: input * 0.1 };
+  return {
+    input,
+    output,
+    cacheWrite5m: input * 1.25,
+    cacheWrite1h: input * 2,
+    cacheRead: input * 0.1,
+  };
 }
 
 const OPUS = rate(5, 25);
@@ -41,7 +48,7 @@ const HAIKU = rate(1, 5);
 const FABLE = rate(10, 50);
 
 export const COST_ASSUMPTIONS =
-  "First-party Anthropic list prices. Cache writes are billed at the 5-minute-TTL rate (1.25x input); 1-hour-TTL writes actually cost 2x, so heavy 1h-cache use is slightly under-counted. Excludes batch (50%) and any intro/tier discounts. Codex/OpenAI models are unpriced. An estimate, not a bill.";
+  "First-party Anthropic list prices. Cache writes are split by TTL from usage.cache_creation and billed at 1.25x input (5-minute) or 2x (1-hour); transcripts that predate that field are billed at the 5-minute rate. Excludes batch (50%) and any intro/tier discounts. Codex/OpenAI models are unpriced. An estimate, not a bill.";
 
 // Match a transcript model id (which may carry a "[1m]" tag or a date suffix)
 // to a rate. Only versions with confirmed $5/$25-class pricing are matched;
@@ -49,7 +56,8 @@ export const COST_ASSUMPTIONS =
 function rateFor(model: string | null): Rate | null {
   if (!model) return null;
   const m = model.toLowerCase().replace(/\[[^\]]*\]/g, "").replace(/-\d{8}$/, "");
-  if (/opus-4-[5678]/.test(m)) return OPUS;
+  // Opus 5 is priced the same as the 4.5–4.8 tier.
+  if (/opus-(5|4-[5678])/.test(m)) return OPUS;
   if (/sonnet-(5|4-[56])/.test(m)) return SONNET;
   if (/haiku-4-5/.test(m)) return HAIKU;
   if (/(fable|mythos)-5/.test(m)) return FABLE;
@@ -63,7 +71,8 @@ function turnCost(turn: Turn): number | null {
   return (
     (turn.input * r.input +
       turn.output * r.output +
-      turn.cacheWrite * r.cacheWrite +
+      turn.cacheWrite5m * r.cacheWrite5m +
+      turn.cacheWrite1h * r.cacheWrite1h +
       turn.cacheRead * r.cacheRead) /
     1_000_000
   );
@@ -74,6 +83,8 @@ export interface TokenTotals {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  // The 1-hour-TTL share of cacheWrite, billed at 2x input instead of 1.25x.
+  cacheWrite1h: number;
   total: number;
   turns: number;
   // Estimated USD across the priced turns only.
@@ -84,6 +95,26 @@ export interface TokenTotals {
 
 export interface ModelTotals extends TokenTotals {
   model: string;
+}
+
+// Spend rolled up by working directory. `project` is the same key the session
+// snapshot uses (the transcript directory for Claude, the cwd for Codex), so
+// the two can be joined in the UI.
+export interface ProjectTotals extends TokenTotals {
+  project: string;
+  label: string;
+  sessions: number;
+  lastActivity: number;
+}
+
+// Spend rolled up by session, subagent transcripts included: an agent burns
+// tokens on behalf of the session that spawned it.
+export interface SessionTotals extends TokenTotals {
+  session: string;
+  project: string;
+  projectLabel: string;
+  models: string[];
+  lastActivity: number;
 }
 
 export interface LastTurn {
@@ -130,6 +161,10 @@ export interface StatusInfo {
   today: TokenTotals;
   sevenDay: TokenTotals;
   byModel: ModelTotals[];
+  // Same seven-day turns as byModel, re-keyed: "which project/session is
+  // burning money" rather than "which model did I spend on".
+  byProject: ProjectTotals[];
+  bySession: SessionTotals[];
   lastTurn: LastTurn | null;
   // Tracked separately from lastTurn: Codex records which model ran even when
   // it records no token counts for the request.
@@ -149,10 +184,13 @@ interface Turn {
   ts: number;
   model: string | null;
   project: string | null;
+  projectLabel: string | null;
+  session: string | null;
   input: number;
   output: number;
   cacheRead: number;
-  cacheWrite: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
 }
 
 function emptyTotals(): TokenTotals {
@@ -161,6 +199,7 @@ function emptyTotals(): TokenTotals {
     output: 0,
     cacheRead: 0,
     cacheWrite: 0,
+    cacheWrite1h: 0,
     total: 0,
     turns: 0,
     cost: 0,
@@ -169,11 +208,13 @@ function emptyTotals(): TokenTotals {
 }
 
 function addTurn(t: TokenTotals, turn: Turn): TokenTotals {
+  const cacheWrite = turn.cacheWrite5m + turn.cacheWrite1h;
   t.input += turn.input;
   t.output += turn.output;
   t.cacheRead += turn.cacheRead;
-  t.cacheWrite += turn.cacheWrite;
-  t.total += turn.input + turn.output + turn.cacheRead + turn.cacheWrite;
+  t.cacheWrite += cacheWrite;
+  t.cacheWrite1h += turn.cacheWrite1h;
+  t.total += turn.input + turn.output + turn.cacheRead + cacheWrite;
   t.turns += 1;
   const cost = turnCost(turn);
   if (cost === null) t.unpricedTurns += 1;
@@ -185,6 +226,12 @@ function sumTurns(turns: Turn[]): TokenTotals {
   return turns.reduce(addTurn, emptyTotals());
 }
 
+// Cost first: the whole point of these breakdowns is "what is expensive". Turns
+// on unpriced models still sort by tokens among themselves.
+function byCost(a: TokenTotals, b: TokenTotals): number {
+  return b.cost - a.cost || b.total - a.total;
+}
+
 function groupByModel(turns: Turn[]): ModelTotals[] {
   const byModel = new Map<string, ModelTotals>();
   for (const turn of turns) {
@@ -194,6 +241,61 @@ function groupByModel(turns: Turn[]): ModelTotals[] {
     byModel.set(model, entry);
   }
   return [...byModel.values()].sort((a, b) => b.total - a.total);
+}
+
+function groupByProject(turns: Turn[]): ProjectTotals[] {
+  const byProject = new Map<string, ProjectTotals & { ids: Set<string> }>();
+  for (const turn of turns) {
+    const project = turn.project ?? "unknown";
+    let entry = byProject.get(project);
+    if (!entry) {
+      entry = {
+        project,
+        label: turn.projectLabel ?? project,
+        sessions: 0,
+        lastActivity: 0,
+        ids: new Set<string>(),
+        ...emptyTotals(),
+      };
+      byProject.set(project, entry);
+    }
+    // The directory name flattens "/" and "-" identically, so a real cwd from
+    // any turn beats the key we grouped on.
+    if (turn.projectLabel) entry.label = turn.projectLabel;
+    if (turn.session) entry.ids.add(turn.session);
+    entry.lastActivity = Math.max(entry.lastActivity, turn.ts);
+    addTurn(entry, turn);
+  }
+  return [...byProject.values()]
+    .map(({ ids, ...rest }) => ({ ...rest, sessions: ids.size }))
+    .sort(byCost);
+}
+
+function groupBySession(turns: Turn[]): SessionTotals[] {
+  const bySession = new Map<string, SessionTotals & { seen: Set<string> }>();
+  for (const turn of turns) {
+    const session = turn.session ?? "unknown";
+    let entry = bySession.get(session);
+    if (!entry) {
+      entry = {
+        session,
+        project: turn.project ?? "unknown",
+        projectLabel: turn.projectLabel ?? turn.project ?? "unknown",
+        models: [],
+        lastActivity: 0,
+        seen: new Set<string>(),
+        ...emptyTotals(),
+      };
+      bySession.set(session, entry);
+    }
+    if (turn.projectLabel) entry.projectLabel = turn.projectLabel;
+    if (turn.model) entry.seen.add(turn.model);
+    entry.lastActivity = Math.max(entry.lastActivity, turn.ts);
+    addTurn(entry, turn);
+  }
+  return [...bySession.values()]
+    .map(({ seen, ...rest }) => ({ ...rest, models: [...seen] }))
+    .sort(byCost);
 }
 
 // The active window is the last one opened: walk forward, restarting whenever a
@@ -252,6 +354,8 @@ function buildStatus(opts: {
     today: sumTurns(turns.filter((t) => t.ts >= midnight)),
     sevenDay: sumTurns(turns),
     byModel: groupByModel(turns),
+    byProject: groupByProject(turns),
+    bySession: groupBySession(turns),
     lastTurn,
     lastModel,
     requests: Math.max(opts.requests, turns.length),
@@ -312,7 +416,25 @@ function walkJsonl(dir: string, out: string[], depth = 0): string[] {
   return out;
 }
 
-function parseClaudeTurns(text: string, project: string, cutoff: number): Turn[] {
+// Cache writes are billed per TTL. `usage.cache_creation` splits the total into
+// 5-minute and 1-hour buckets; transcripts written before that field existed
+// only have the total, which falls back to the cheaper 5-minute rate.
+function splitCacheWrite(usage: any): { m5: number; h1: number } {
+  const total = usage.cache_creation_input_tokens ?? 0;
+  const c = usage.cache_creation;
+  if (!c || typeof c !== "object") return { m5: total, h1: 0 };
+  const h1 = c.ephemeral_1h_input_tokens ?? 0;
+  const m5 = c.ephemeral_5m_input_tokens ?? 0;
+  // Trust the total; give any unattributed remainder the cheaper rate.
+  return { m5: Math.max(m5, total - h1), h1 };
+}
+
+function parseClaudeTurns(
+  text: string,
+  project: string,
+  session: string,
+  cutoff: number
+): Turn[] {
   const turns: Turn[] = [];
   for (const line of text.split("\n")) {
     // cheap pre-filter — only assistant entries carry a usage block
@@ -329,14 +451,18 @@ function parseClaudeTurns(text: string, project: string, cutoff: number): Turn[]
     const ts = entry.timestamp ? Date.parse(entry.timestamp) : 0;
     if (!ts || ts < cutoff) continue;
     const model = entry.message?.model;
+    const cache = splitCacheWrite(usage);
     turns.push({
       ts,
       model: typeof model === "string" && model !== "<synthetic>" ? model : null,
       project,
+      projectLabel: typeof entry.cwd === "string" ? entry.cwd : null,
+      session,
       input: usage.input_tokens ?? 0,
       output: usage.output_tokens ?? 0,
       cacheRead: usage.cache_read_input_tokens ?? 0,
-      cacheWrite: usage.cache_creation_input_tokens ?? 0,
+      cacheWrite5m: cache.m5,
+      cacheWrite1h: cache.h1,
     });
   }
   return turns;
@@ -390,7 +516,8 @@ export function claudeStatus(): StatusInfo {
   }
 
   for (const dir of projectDirs) {
-    for (const file of walkJsonl(path.join(PROJECTS_DIR, dir.name), [])) {
+    const projectPath = path.join(PROJECTS_DIR, dir.name);
+    for (const file of walkJsonl(projectPath, [])) {
       let st: fs.Stats;
       try {
         st = fs.statSync(file);
@@ -400,12 +527,19 @@ export function claudeStatus(): StatusInfo {
       // a transcript untouched since the cutoff holds nothing in range
       if (st.mtimeMs < cutoff) continue;
       filesScanned++;
+      // "<session>.jsonl" for a session, "<session>/subagents/agent-<id>.jsonl"
+      // for one of its agents — either way the first path segment names the
+      // session whose budget the tokens came out of.
+      const session = path
+        .relative(projectPath, file)
+        .split(path.sep)[0]
+        .replace(/\.jsonl$/, "");
       turns.push(
         ...cachedParse(
           file,
           st.mtimeMs,
           st.size,
-          (text) => parseClaudeTurns(text, dir.name, cutoff),
+          (text) => parseClaudeTurns(text, dir.name, session, cutoff),
           []
         )
       );
@@ -467,12 +601,16 @@ function parseRateLimitWindow(win: any, at: number): Partial<QuotaInfo> | null {
   };
 }
 
-function parseCodexFile(text: string, project: string, cutoff: number): CodexParse {
+function parseCodexFile(text: string, fallbackId: string, cutoff: number): CodexParse {
   const turns: Turn[] = [];
   let quota: QuotaInfo | null = null;
   let lastModel: { model: string; at: number } | null = null;
   let model: string | null = null;
   let requests = 0;
+  // Rollouts open with a session_meta record naming the session and its cwd;
+  // both are stamped onto the turns once the file has been read.
+  let session: string | null = null;
+  let cwd: string | null = null;
 
   for (const line of text.split("\n")) {
     let entry: any;
@@ -482,6 +620,12 @@ function parseCodexFile(text: string, project: string, cutoff: number): CodexPar
       continue;
     }
     const ts = entry?.timestamp ? Date.parse(entry.timestamp) : 0;
+
+    if (entry?.type === "session_meta") {
+      session ??= entry.payload?.id ? String(entry.payload.id) : null;
+      cwd ??= entry.payload?.cwd ? String(entry.payload.cwd) : null;
+      continue;
+    }
 
     // the model can change from turn to turn — the newest one wins
     if (entry?.type === "turn_context" && entry.payload?.model) {
@@ -499,11 +643,15 @@ function parseCodexFile(text: string, project: string, cutoff: number): CodexPar
       turns.push({
         ts,
         model,
-        project,
+        // filled in below, once session_meta has been seen
+        project: null,
+        projectLabel: null,
+        session: null,
         input: used.input_tokens ?? 0,
         output: used.output_tokens ?? 0,
         cacheRead: used.cached_input_tokens ?? 0,
-        cacheWrite: 0,
+        cacheWrite5m: 0,
+        cacheWrite1h: 0,
       });
     }
 
@@ -531,6 +679,15 @@ function parseCodexFile(text: string, project: string, cutoff: number): CodexPar
           : "Codex recorded a rate-limit entry but no usage window — the server had not reported one yet.",
       };
     }
+  }
+
+  // Codex groups sessions by working directory, matching what the session
+  // snapshot uses as a project key.
+  const project = cwd ?? "(unknown)";
+  for (const turn of turns) {
+    turn.project = project;
+    turn.projectLabel = project;
+    turn.session = session ?? fallbackId;
   }
   return { turns, quota, lastModel, requests };
 }
@@ -595,7 +752,14 @@ export function codexStatus(): StatusInfo {
       file,
       st.mtimeMs,
       st.size,
-      (text) => parseCodexFile(text, path.basename(file), cutoff),
+      // rollout-<ts>-<uuid>.jsonl — the uuid is the session id, used only if
+      // the file's session_meta record is missing or truncated away
+      (text) =>
+        parseCodexFile(
+          text,
+          path.basename(file, ".jsonl").split("-").slice(-5).join("-"),
+          cutoff
+        ),
       empty
     );
     turns.push(...parsed.turns);

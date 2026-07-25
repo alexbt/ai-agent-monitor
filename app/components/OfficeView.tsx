@@ -7,11 +7,13 @@ import {
   useSnapshot,
   timeAgo,
   shortId,
+  sessionLabel,
   fmtDuration,
   modelLabel,
   type Provider,
 } from "@/lib/useSnapshot";
 import { usePrompts, useViewMode, type Prompt } from "@/lib/usePrompts";
+import { useCosts, fmtCost } from "@/lib/useCosts";
 import SessionTrace from "./SessionTrace";
 
 const MAX_DESKS = 12;
@@ -34,12 +36,6 @@ interface DeskOccupant {
 // Full text on purpose: the dropdown wraps it and the closed toggle clips with
 // an ellipsis at whatever width it actually has, which beats guessing a
 // character count that was cutting titles short.
-function sessionLabel(s: SessionInfo): string {
-  // Claude Code's own title when it has written one — it stays accurate for a
-  // long session in a way the opening prompt does not.
-  return s.agentName ?? s.title ?? s.firstPrompt ?? shortId(s.id);
-}
-
 function runningTime(
   active: boolean,
   startedAt: number,
@@ -485,6 +481,9 @@ export default function OfficeView({ provider }: { provider: Provider }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useViewMode();
   const { prompts } = usePrompts(provider, mode === "prompts");
+  // Spend is only known per session, so it's shown in Sessions mode only —
+  // against a single prompt it would read as that prompt's cost.
+  const costs = useCosts(provider);
   // Which prompt the picker is pointing at, as "<sessionId>#<n>".
   const [selectedPrompt, setSelectedPrompt] = useState<string | null>(null);
 
@@ -500,8 +499,9 @@ export default function OfficeView({ provider }: { provider: Provider }) {
     if (n) setSelectedPrompt(`${id}#${n}`);
   }, []);
 
-  // Where the "Log" button links back to for this provider.
+  // Where the "Log" and "Status" buttons link across to for this provider.
   const logHref = provider === "codex" ? "/codex" : "/claude";
+  const statusHref = provider === "codex" ? "/codex/status" : "/status";
 
   const sessions: (SessionInfo & { projectName: string })[] = (
     snapshot?.projects ?? []
@@ -549,6 +549,16 @@ export default function OfficeView({ provider }: { provider: Provider }) {
     sessions.find((s) => s.id === selectedId) ??
     sessions[0] ??
     null;
+
+  const sessionTotals = selected ? costs.bySession.get(selected.id) : undefined;
+  const sessionCost =
+    sessionTotals && sessionTotals.cost > 0 ? sessionTotals : null;
+
+  // Carried on every cross-view link so the other view lands on the same turn.
+  const promptParam =
+    selected && selectedChoice?.session.id === selected.id
+      ? `&prompt=${selectedChoice.prompt.n}`
+      : "";
 
   let desks: DeskOccupant[] = [];
   if (selected) {
@@ -657,17 +667,6 @@ export default function OfficeView({ provider }: { provider: Provider }) {
                 now={now}
               />
             )}
-            <Link
-              className="nav-btn"
-              href={`${logHref}?session=${encodeURIComponent(selected.id)}${
-                selectedChoice?.session.id === selected.id
-                  ? `&prompt=${selectedChoice.prompt.n}`
-                  : ""
-              }`}
-              title="Open this session in the Session Log"
-            >
-              ☰ Log
-            </Link>
           </div>
 
           <div className="office-panel">
@@ -680,9 +679,30 @@ export default function OfficeView({ provider }: { provider: Provider }) {
                 </span>
               )}
               {selected.gitBranch && <span className="badge">{selected.gitBranch}</span>}
-              <span className="legend">
-                <span className="legend-item out">→ main to agent</span>
-                <span className="legend-item in">→ agent to main</span>
+              {mode === "sessions" && sessionCost !== null && (
+                <span
+                  className="badge cost"
+                  title={`Estimated spend over the last 7 days · ${sessionCost.turns.toLocaleString()} requests`}
+                >
+                  {fmtCost(sessionCost.cost)}
+                </span>
+              )}
+              {/* Same session (and prompt, in prompts mode) in the other views. */}
+              <span className="picker-actions">
+                <Link
+                  className="nav-btn sm"
+                  href={`${logHref}?session=${encodeURIComponent(selected.id)}${promptParam}`}
+                  title="Open this session in the Session Log"
+                >
+                  ☰ Log
+                </Link>
+                <Link
+                  className="nav-btn sm"
+                  href={`${statusHref}?session=${encodeURIComponent(selected.id)}${promptParam}`}
+                  title="Show this session's usage and cost in Status"
+                >
+                  📊 Status
+                </Link>
               </span>
               <span className="time">
                 {selected.active

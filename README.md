@@ -4,7 +4,7 @@ A real-time dashboard for watching [Claude Code](https://claude.com/claude-code)
 
 > Formerly known as *Claude Agent Monitor* / *claude-ui* — the repo was renamed to **ai-agent-monitor** when Codex support was added.
 
-Claude Code writes every session, subagent, and teammate transcript to `~/.claude/projects/` (Codex writes rollouts to `~/.codex/sessions/`). This app watches those files and turns them into live views. The sidebar has a **Claude** and a **Codex** section, each offering the same two views:
+Claude Code writes every session, subagent, and teammate transcript to `~/.claude/projects/` (Codex writes rollouts to `~/.codex/sessions/`). This app watches those files and turns them into live views. The sidebar has a **Claude** and a **Codex** section, each offering the same three views:
 
 - **Session Log** — all sessions grouped by project, with their agents nested under them. Active sessions/agents pulse green; every session is expandable to show its full conversation trace (user messages, assistant replies, tool calls) streaming in real time, with tool results expanding into rendered diffs and command output.
 
@@ -13,6 +13,8 @@ Claude Code writes every session, subagent, and teammate transcript to `~/.claud
 - **Office View** — pick a session and see it as a small office: the main agent at the front desk, every teammate and subagent at their own desk with a live running clock. Animated, labeled arrows show communication flowing between them (messages, spawns, tool activity) as it happens.
 
   ![Office View](docs/office-view.png)
+
+- **Status** — plan, the current 5-hour window, and token/dollar usage over the last 7 days, broken down by **session**, **project**, or **model**. Session and project answer "which of my six sessions is burning money"; sessions are listed by title and link straight into the Session Log. Spend also shows up where you browse: a cost badge on each session in the Session Log and Office View, and a 7-day total on every project heading. Sessions mode only — against a single prompt a session's total would read as that prompt's cost.
 
 Everything is read-only: the app never talks to Claude or Codex and never modifies any files — it only tails transcripts.
 
@@ -66,6 +68,7 @@ Without make: `npm install`, then `npm run dev`.
 ```
 
 - `lib/scanner.ts` scans the Claude tree and builds a snapshot: projects → sessions (first prompt, git branch, teammate name/team) → agents (type, description, activity). "Active" means the transcript was written in the last 60 seconds. Recent transcript tails are parsed for communication events (teammate messages, `SendMessage`/`Agent` tool calls, current tool usage).
+- `lib/status.ts` is the usage/cost pass: plan details from `~/.claude.json` (or the Codex `auth.json` id_token), quota from Codex's `rate_limits` events, and seven days of `usage` blocks aggregated by model, project, and session. Parse output is cached per file+mtime, so an idle transcript is read once. `lib/useCosts.ts` is the client half — it polls `/api/status` so the Session Log can show per-session and per-project spend.
 - `lib/codex.ts` does the same for Codex rollouts, mapping them into the identical snapshot shape (sessions grouped by working directory, titles from Codex's `session_index.jsonl`), so the whole UI is provider-agnostic.
 - `app/api/stream/route.ts` polls the selected provider's scanner every 2s and pushes snapshots to the browser over Server-Sent Events (only when something changed; one shared scan across all clients).
 - `app/api/trace/route.ts` streams a session's full conversation, then tails the file by byte offset for live updates; it parses whichever transcript format the provider uses into the same trace items. `lib/traceDetail.ts` turns each entry's `toolUseResult` into a typed payload the panel can render properly (see below).
@@ -79,6 +82,7 @@ Without make: `npm install`, then `npm run dev`.
 - **Session titles** come from the `ai-title` record Claude Code writes into its own transcript (`{"type":"ai-title","aiTitle":…}`) — a short LLM-written summary of what the session is about, which beats labelling a multi-hour session by whatever was typed first. The opening prompt is still shown, on a second line beneath the title.
 
   It's read from both ends of the file, no extra I/O: the tail pass that already tracks the model takes the newest one, and the header read covers long sessions whose last 64 KB happens to contain none (the record repeats only every few turns — as little as once per 64 KB on the transcripts here). Whichever is found is sticky, so the title can't flicker back to unknown. Sessions ending before Claude Code generates a title, and all Codex sessions (no equivalent record), keep falling back to the first prompt.
+- **Moving between views** — every view links to the other two for whatever it is currently showing, carrying `?session=…` and, where one is selected, `&prompt=…`. The Session Log's rows have **Office** and **Status** buttons, the Office View puts **Log** and **Status** in the office panel's title row (so the picker dropdown spans the full column), and each session row in Status has **Office** and **Log**. Arriving at Status this way switches the breakdown to Session, expands past the top-12 cut if the row is below it, and scrolls to and highlights that row — or says so plainly when the session had no priced usage in the lookback and therefore has no row.
 - **Prompts / Sessions mode** — a toggle in the header of both views, defaulting to Prompts. A session is a sequence of many prompts, and labelling it by its first one goes stale fast, so Prompts mode breaks the list apart: one row per prompt, newest first, tagged `n/total` with the session it belongs to. Picking one opens that session's trace scrolled to that exact turn. Sessions mode is the one-row-per-session view. The choice is remembered and shared by both views.
 
   Only prompts you actually typed are listed. Claude Code marks them with `promptSource: "typed"`, which separates them from the background-task reports, hook output and slash-command wrappers that arrive through the same `user` channel (on this machine, a third of them). Older transcripts predate that field, so they fall back to filtering on the wrapping tag.
@@ -87,6 +91,15 @@ Without make: `npm install`, then `npm run dev`.
 - **Tool results in the trace** — transcripts store far more per tool call than a flattened string. Each entry carries a `toolUseResult`: `structuredPatch` for edits, `stdout`/`stderr`/`interrupted` for shell commands, the file slice a `Read` pulled in, and `agentId`/`status`/`resolvedModel` for subagent launches. `lib/traceDetail.ts` maps those shapes to a `ToolDetail` union; unknown ones (MCP tools, new built-ins) fall back to pretty-printed JSON rather than being dropped.
 
   Each row therefore shows a purpose-built one-line summary (`lib/scanner.ts · +14 −46`, the command itself, the first line of output) and expands into the real thing: a coloured diff with old/new line numbers, stdout and stderr kept apart, the file contents. Results are paired back to the call that produced them via `tool_use_id`, so a result row is labelled with its tool name, and failures (`is_error`) are marked in red. The filter box searches inside collapsed payloads too. Rows carry a timestamp and a copy button, and the panel has a fullscreen mode (Esc to leave).
+- **Cost estimation** — `lib/status.ts` walks every transcript in the last 7 days and pulls the `usage` block off each assistant turn, then aggregates the same turns three ways: by model, by project, and by session. Regrouping is the only difference between them, so "which project cost the most" is as cheap as "which model".
+
+  Cache writes are billed by TTL, and `usage.cache_creation` splits the total into `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`. The 1-hour share costs 2x input rather than 1.25x, and on the transcripts here it is about two thirds of all cache writes — so pricing it as 5-minute under-counted materially. Both buckets are priced separately and the table shows the 1h share per row. Transcripts predating that field fall back to the cheaper rate.
+
+  Only models with confirmed pricing are priced (Opus 5 and 4.5–4.8, Sonnet 5 and 4.5/4.6, Haiku 4.5, Fable/Mythos 5); anything else — Codex/OpenAI models, older tiers on different rates — contributes tokens but no dollars, and the count of those requests is surfaced rather than silently folded into the total. Costs come from `/api/status` on a 30-second poll, not the 2-second snapshot scan, because collecting them means reading every transcript end to end.
+
+  A session's subagent transcripts count against the session that spawned them: an agent burns tokens on the session's behalf, so `<session>/subagents/agent-*.jsonl` rolls up into `<session>`.
+
+  Usage aggregates carry no session title — the snapshot already does, so the Status table names its rows from that rather than making the cost pass re-read every transcript header. `sessionLabel()` in `lib/useSnapshot.ts` is the shared naming rule (teammate name → LLM title → opening prompt → id), so a session reads the same everywhere it appears.
 - Communication arrows and labels come from transcript tails within a ~90-second window — they visualize recent flow, not the full message history (the trace panel has that).
 - The office view shows up to 12 desks per session; extras are counted below the scene.
 - Codex sessions are single-agent (no subagent transcripts), so their Office View shows the main agent working alone; traces and activity work the same as for Claude.

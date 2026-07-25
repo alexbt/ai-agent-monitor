@@ -11,7 +11,23 @@ import {
   modelLabel,
   type Provider,
 } from "@/lib/useSnapshot";
+import { useCosts, fmtCost, type Costs } from "@/lib/useCosts";
 import SessionTrace from "./SessionTrace";
+
+// Estimated spend for one session over the status page's 7-day lookback.
+// Absent for sessions that saw no priced traffic in that window.
+function CostBadge({ costs, sessionId }: { costs: Costs; sessionId: string }) {
+  const totals = costs.bySession.get(sessionId);
+  if (!totals || totals.cost === 0) return null;
+  return (
+    <span
+      className="badge cost"
+      title={`Estimated spend over the last 7 days · ${totals.turns.toLocaleString()} requests`}
+    >
+      {fmtCost(totals.cost)}
+    </span>
+  );
+}
 
 function AgentRow({ agent, now }: { agent: AgentInfo; now: number }) {
   return (
@@ -49,6 +65,8 @@ function PromptCard({
   onToggle: () => void;
 }) {
   const officeHref = provider === "codex" ? "/codex/visual" : "/visual";
+  const statusHref = provider === "codex" ? "/codex/status" : "/status";
+  const target = `session=${encodeURIComponent(session.id)}&prompt=${prompt.n}`;
   return (
     <div
       id={`prompt-${session.id}-${prompt.n}`}
@@ -75,10 +93,17 @@ function PromptCard({
         </span>
         <Link
           className="nav-btn sm"
-          href={`${officeHref}?session=${encodeURIComponent(session.id)}&prompt=${prompt.n}`}
+          href={`${officeHref}?${target}`}
           title="Open this prompt's session in the Office View"
         >
           🏢 Office
+        </Link>
+        <Link
+          className="nav-btn sm"
+          href={`${statusHref}?${target}`}
+          title="Show this session's usage and cost in Status"
+        >
+          📊 Status
         </Link>
       </div>
       {expanded && (
@@ -97,17 +122,21 @@ function SessionCard({
   session,
   now,
   provider,
+  costs,
   expanded,
   onToggle,
 }: {
   session: SessionInfo;
   now: number;
   provider: Provider;
+  costs: Costs;
   expanded: boolean;
   onToggle: () => void;
 }) {
   const activeAgents = session.agents.filter((a) => a.active).length;
   const officeHref = provider === "codex" ? "/codex/visual" : "/visual";
+  const statusHref = provider === "codex" ? "/codex/status" : "/status";
+  const target = `session=${encodeURIComponent(session.id)}`;
   return (
     <div
       id={`session-${session.id}`}
@@ -134,6 +163,7 @@ function SessionCard({
           </span>
         )}
         {session.gitBranch && <span className="badge">{session.gitBranch}</span>}
+        <CostBadge costs={costs} sessionId={session.id} />
         <span className="time">{timeAgo(session.lastActivity, now)}</span>
         {session.agents.length > 0 && (
           <span className="agent-count">
@@ -143,10 +173,17 @@ function SessionCard({
         )}
         <Link
           className="nav-btn sm"
-          href={`${officeHref}?session=${encodeURIComponent(session.id)}`}
+          href={`${officeHref}?${target}`}
           title="Open this session in the Office View"
         >
           🏢 Office
+        </Link>
+        <Link
+          className="nav-btn sm"
+          href={`${statusHref}?${target}`}
+          title="Show this session's usage and cost in Status"
+        >
+          📊 Status
         </Link>
       </div>
       {session.agents.length > 0 && (
@@ -188,6 +225,7 @@ function matchesDescription(
 
 export default function SessionLogView({ provider }: { provider: Provider }) {
   const { snapshot, connected, now } = useSnapshot(10_000, provider);
+  const costs = useCosts(provider);
   const [mode, setMode] = useViewMode();
   const { prompts, loaded: promptsLoaded } = usePrompts(
     provider,
@@ -338,6 +376,13 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
     0
   );
 
+  // Seven-day spend for a project heading, or "" when nothing priced landed in
+  // that window (an archive of old sessions shouldn't claim it cost $0.00).
+  const projectCost = (name: string): string => {
+    const totals = costs.byProject.get(name);
+    return totals && totals.cost > 0 ? `${fmtCost(totals.cost)} · 7d` : "";
+  };
+
   return (
     <main>
       <header>
@@ -433,13 +478,19 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
       {mode === "sessions" &&
         projects.map((project) => (
           <section key={project.name}>
-            <h2>{project.displayName}</h2>
+            <h2>
+              {project.displayName}
+              <span className="section-count">
+                {projectCost(project.name)}
+              </span>
+            </h2>
             {project.sessions.map((s) => (
               <SessionCard
                 key={s.id}
                 session={s}
                 now={now}
                 provider={provider}
+                costs={costs}
                 expanded={expandedId === s.id}
                 onToggle={() =>
                   setExpandedId((cur) => (cur === s.id ? null : s.id))
@@ -454,7 +505,10 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
           <section key={project.name}>
             <h2>
               {project.displayName}
-              <span className="section-count">{project.rows.length} prompts</span>
+              <span className="section-count">
+                {project.rows.length} prompts
+                {projectCost(project.name) && ` · ${projectCost(project.name)}`}
+              </span>
             </h2>
             {project.rows.map(({ session, prompt, total }) => {
               const key = `${session.id}#${prompt.n}`;

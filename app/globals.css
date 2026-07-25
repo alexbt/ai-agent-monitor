@@ -351,6 +351,11 @@ h2 {
   border-color: #3d4450;
 }
 
+.badge.cost {
+  color: var(--accent);
+  border-color: #3d4450;
+}
+
 /* --- prompts mode --- */
 
 .prompt-row {
@@ -543,10 +548,81 @@ h2 .section-count {
   font-weight: 400;
 }
 
+/* Two-line first cell: the thing being measured, plus what identifies it.
+   A session title can be a whole opening prompt, so it is clipped rather than
+   allowed to push the numeric columns off the page. */
+.row-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  max-width: 340px;
+}
+
+.row-label > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-sub {
+  font-size: 10px;
+  color: var(--gray);
+}
+
+/* The 1h share of a cache-write figure — it's billed at 2x rather than 1.25x. */
+.sub-note {
+  font-size: 10px;
+  color: var(--gray);
+}
+
+.session-link {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--border);
+}
+
+.session-link:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.show-all {
+  margin-top: 10px;
+}
+
+/* Section heading with a control in it (the usage breakdown switcher). Opt-in
+   so the plain h2 keeps working with the floated .section-count. */
+h2.with-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+h2.with-actions .seg {
+  margin-left: auto;
+}
+
 .usage-table tfoot td {
   color: var(--text-dim);
   border-bottom: none;
   border-top: 1px solid var(--border);
+}
+
+/* Cross-view links, shown only on the session breakdown. */
+.row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* The row a ?session=… link pointed at, matching the trace panel's focus tint. */
+.usage-table tr.focused td {
+  background: rgba(217, 119, 87, 0.14);
+}
+
+.usage-table tr.focused td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .footnote {
@@ -922,10 +998,10 @@ h2 .section-count {
   margin-bottom: 18px;
 }
 
-/* Pushed to the content's right edge so it lines up with the panels below,
-   independently of how wide the dropdown next to it ends up. */
-.session-picker .nav-btn {
-  margin-left: auto;
+/* Cross-view links, in the office panel's title row. */
+.picker-actions {
+  display: flex;
+  gap: 6px;
   flex-shrink: 0;
 }
 
@@ -936,12 +1012,12 @@ h2 .section-count {
   animation: pulse 1.6s ease-in-out infinite;
 }
 
-/* Uncapped on purpose: it takes every pixel left over after the Log button,
-   which keeps its own place at the column's right edge. */
+/* Uncapped on purpose: the picker holds nothing else, so it spans the column's
+   full width — the cross-view links live in the office title row below. */
 .dropdown {
   position: relative;
   flex: 1;
-  min-width: 0; /* let it yield space rather than push the Log button out */
+  min-width: 0;
 }
 
 .dropdown-toggle,
@@ -1235,20 +1311,3 @@ h2 .section-count {
   fill: var(--green);
 }
 
-.legend {
-  display: flex;
-  gap: 12px;
-  margin-left: 6px;
-}
-
-.legend-item {
-  font-size: 11px;
-}
-
-.legend-item.out {
-  color: var(--accent);
-}
-
-.legend-item.in {
-  color: var(--green);
-}
