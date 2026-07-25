@@ -10,12 +10,62 @@ const ACTIVE_WINDOW_MS = 60_000;
 // Communication events (teammate messages, agent spawns) stay visible this long.
 const COMM_WINDOW_MS = 90_000;
 
+// One hunk of a unified diff, as transcripts record it under `structuredPatch`.
+export interface DiffHunk {
+  oldStart: number;
+  newStart: number;
+  lines: string[]; // each prefixed "+", "-" or " "
+}
+
+// The structured payload behind a tool call or its result. Transcripts carry
+// far more than the flattened string a trace row shows collapsed; this is what
+// the panel expands into.
+export type ToolDetail =
+  | {
+      type: "diff";
+      filePath: string;
+      hunks: DiffHunk[];
+      added: number;
+      removed: number;
+      truncated: boolean;
+    }
+  | {
+      type: "file";
+      filePath: string;
+      content: string;
+      startLine: number;
+      totalLines: number | null;
+      truncated: boolean;
+    }
+  | {
+      type: "bash";
+      stdout: string;
+      stderr: string;
+      interrupted: boolean;
+      truncated: boolean;
+    }
+  | {
+      type: "agent";
+      agentId: string;
+      status: string | null;
+      model: string | null;
+      description: string | null;
+      prompt: string;
+      truncated: boolean;
+    }
+  | { type: "list"; items: string[]; total: number; truncated: boolean }
+  | { type: "text"; text: string; truncated: boolean };
+
 // One rendered line of a session's conversation trace.
 export interface TraceItem {
   kind: "user" | "assistant" | "tool" | "tool_result";
   name?: string;
-  text: string;
+  text: string; // collapsed one-line summary
   ts: number;
+  // Expandable structured payload, when the entry carried one.
+  detail?: ToolDetail;
+  // True when the tool reported a failure (`is_error` on the result block).
+  error?: boolean;
 }
 
 export interface CommEvent {

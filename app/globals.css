@@ -615,13 +615,35 @@ h2 .section-count {
 
 .trace {
   margin-top: 12px;
-  max-height: 480px;
+  max-height: max(480px, 60vh);
   overflow-y: auto;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
   font-size: 12px;
+}
+
+/* Fullscreen: the trace is the only thing worth looking at, so let it use the
+   whole window instead of a 480px slot inside a card. */
+.trace-wrap.fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  padding: 14px 18px 18px;
+}
+
+.trace-wrap.fullscreen .trace-search {
+  margin: 0;
+}
+
+.trace-wrap.fullscreen .trace {
+  flex: 1;
+  max-height: none;
+  min-height: 0;
 }
 
 .trace-empty {
@@ -649,11 +671,68 @@ h2 .section-count {
   white-space: nowrap;
 }
 
+.trace-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.trace-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .trace-text {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text);
   min-width: 0;
+}
+
+/* Timestamp and copy button, parked on the right of every row. */
+.trace-side {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  /* stay on the summary line when the row expands into a tall diff */
+  align-self: flex-start;
+}
+
+.trace-time {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  color: var(--gray);
+  font-variant-numeric: tabular-nums;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--gray);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.trace-item:hover .icon-btn,
+.icon-btn:focus-visible,
+.icon-btn.ok {
+  opacity: 1;
+}
+
+.icon-btn:hover {
+  color: var(--accent);
+  background: var(--panel-2);
+}
+
+.icon-btn.ok {
+  color: var(--green);
 }
 
 .trace-item.user {
@@ -676,11 +755,162 @@ h2 .section-count {
   border-left-color: var(--gray);
 }
 
+.trace-item.errored {
+  border-left-color: #f85149;
+}
+
+.trace-item.errored .trace-role {
+  color: #f85149;
+}
+
 .trace-item.tool .trace-text,
 .trace-item.tool_result .trace-text {
   color: var(--text-dim);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
+  /* Keep tool rows scannable — a long command or path is one click from full. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* --- expandable tool payloads --- */
+
+.detail-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 8px;
+  color: var(--text-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.detail-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.detail-toggle .chevron {
+  margin-left: 0;
+  font-size: 9px;
+}
+
+.detail-toggle.open .chevron {
+  transform: rotate(90deg);
+}
+
+.detail-body {
+  margin-top: 6px;
+}
+
+.detail-body pre,
+.diff {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 420px;
+  overflow: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.trace-wrap.fullscreen .detail-body pre,
+.trace-wrap.fullscreen .diff {
+  max-height: none;
+}
+
+.detail-body pre {
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.detail-body pre.err {
+  color: #f85149;
+}
+
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.detail-note {
+  font-size: 10px;
+  color: var(--gray);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  margin: 4px 0;
+}
+
+.detail-note.warn {
+  color: #d29922;
+}
+
+/* --- structured diffs --- */
+
+.diff {
+  margin-top: 6px;
+  padding: 6px 0;
+}
+
+.diff-hunk + .diff-hunk {
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.diff-line {
+  display: flex;
+  gap: 0;
+  white-space: pre;
+}
+
+.diff-line code {
+  flex: 1;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Old/new line numbers, so a hunk can be matched against the real file. */
+.diff-line .ln {
+  flex-shrink: 0;
+  width: 44px;
+  padding-right: 8px;
+  text-align: right;
+  color: var(--gray);
+  opacity: 0.7;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-line.meta {
+  color: var(--text-dim);
+  background: var(--panel-2);
+}
+
+.diff-line.add {
+  background: rgba(63, 185, 80, 0.12);
+  color: #7ee787;
+}
+
+.diff-line.del {
+  background: rgba(248, 81, 73, 0.12);
+  color: #ffa198;
+}
+
+.diff-line.ctx {
+  color: var(--text-dim);
 }
 
 /* ---- Visual Agent Monitor ---- */

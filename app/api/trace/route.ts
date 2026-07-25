@@ -2,66 +2,92 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import type { TraceItem } from "@/lib/scanner";
-import { codexSessionPath, codexLinesToItems } from "@/lib/codex";
+import { codexSessionPath, makeCodexParser } from "@/lib/codex";
+import {
+  MAX_SUMMARY,
+  MAX_TEXT,
+  detailSummary,
+  inputDetail,
+  resultDetail,
+  toolSummary,
+} from "@/lib/traceDetail";
 
 export const dynamic = "force-dynamic";
 
 const POLL_INTERVAL_MS = 1500;
-const MAX_TEXT = 4000;
 
-function toItems(lines: string[]): TraceItem[] {
-  const items: TraceItem[] = [];
-  for (const line of lines) {
-    let entry: any;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const ts = entry?.timestamp ? Date.parse(entry.timestamp) : 0;
-    const content = entry?.message?.content;
+// A tool result names the call it answers (`tool_use_id`) but not the tool, so
+// remember the names as the stream goes by. Stateful across polls, hence a
+// factory: one parser per open connection.
+function makeClaudeParser(): (lines: string[]) => TraceItem[] {
+  const toolNames = new Map<string, string>();
 
-    if (entry?.type === "user") {
-      if (typeof content === "string") {
-        items.push({ kind: "user", text: content.slice(0, MAX_TEXT), ts });
-      } else if (Array.isArray(content)) {
-        for (const c of content) {
-          if (c?.type === "text" && c.text?.trim()) {
-            items.push({ kind: "user", text: c.text.slice(0, MAX_TEXT), ts });
-          } else if (c?.type === "tool_result") {
-            const raw =
-              typeof c.content === "string"
-                ? c.content
-                : Array.isArray(c.content)
-                  ? c.content.map((p: any) => p?.text ?? "").join(" ")
-                  : "";
-            const text = raw.replace(/\s+/g, " ").trim();
-            if (text) {
-              items.push({ kind: "tool_result", text: text.slice(0, 600), ts });
+  return (lines: string[]): TraceItem[] => {
+    const items: TraceItem[] = [];
+    for (const line of lines) {
+      let entry: any;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const ts = entry?.timestamp ? Date.parse(entry.timestamp) : 0;
+      const content = entry?.message?.content;
+
+      if (entry?.type === "user") {
+        if (typeof content === "string") {
+          items.push({ kind: "user", text: content.slice(0, MAX_TEXT), ts });
+        } else if (Array.isArray(content)) {
+          // `toolUseResult` sits on the entry rather than inside the block, so
+          // it belongs to the first tool_result here — in practice the only one.
+          let detail = resultDetail(entry.toolUseResult);
+          for (const c of content) {
+            if (c?.type === "text" && c.text?.trim()) {
+              items.push({ kind: "user", text: c.text.slice(0, MAX_TEXT), ts });
+            } else if (c?.type === "tool_result") {
+              const raw =
+                typeof c.content === "string"
+                  ? c.content
+                  : Array.isArray(c.content)
+                    ? c.content.map((p: any) => p?.text ?? "").join(" ")
+                    : "";
+              const flat = raw.replace(/\s+/g, " ").trim();
+              const d = detail;
+              detail = undefined;
+              const text = (d ? detailSummary(d) : flat).slice(0, MAX_SUMMARY);
+              if (!text && !d) continue;
+              items.push({
+                kind: "tool_result",
+                name: toolNames.get(c.tool_use_id),
+                text,
+                ts,
+                ...(d ? { detail: d } : {}),
+                ...(c.is_error ? { error: true } : {}),
+              });
             }
           }
         }
-      }
-    } else if (entry?.type === "assistant" && Array.isArray(content)) {
-      for (const c of content) {
-        if (c?.type === "text" && c.text?.trim()) {
-          items.push({ kind: "assistant", text: c.text.slice(0, MAX_TEXT), ts });
-        } else if (c?.type === "tool_use") {
-          let input = "";
-          try {
-            input = JSON.stringify(c.input);
-          } catch {}
-          items.push({
-            kind: "tool",
-            name: c.name,
-            text: input.slice(0, 600),
-            ts,
-          });
+      } else if (entry?.type === "assistant" && Array.isArray(content)) {
+        for (const c of content) {
+          if (c?.type === "text" && c.text?.trim()) {
+            items.push({ kind: "assistant", text: c.text.slice(0, MAX_TEXT), ts });
+          } else if (c?.type === "tool_use") {
+            if (c.id) toolNames.set(c.id, c.name);
+            const summary = toolSummary(c.input).slice(0, MAX_SUMMARY);
+            const detail = inputDetail(c.input, summary);
+            items.push({
+              kind: "tool",
+              name: c.name,
+              text: summary,
+              ts,
+              ...(detail ? { detail } : {}),
+            });
+          }
         }
       }
     }
-  }
-  return items;
+    return items;
+  };
 }
 
 export async function GET(request: Request) {
@@ -93,7 +119,8 @@ export async function GET(request: Request) {
   if (!fs.existsSync(filePath)) {
     return new Response("not found", { status: 404 });
   }
-  const parseLines = provider === "codex" ? codexLinesToItems : toItems;
+  const parseLines =
+    provider === "codex" ? makeCodexParser() : makeClaudeParser();
 
   const encoder = new TextEncoder();
   let interval: ReturnType<typeof setInterval> | null = null;
