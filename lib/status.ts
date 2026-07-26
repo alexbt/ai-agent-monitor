@@ -15,8 +15,16 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // Turns older than this are never aggregated.
 const LOOKBACK_MS = 7 * DAY_MS;
 
-// Transcripts are read whole; past this size only the tail is worth scanning.
-const MAX_READ_BYTES = 8 * 1024 * 1024;
+// Transcripts are read whole; past this size only the tail is scanned.
+//
+// This is a safety valve against a pathological file, not a performance knob:
+// a partial read silently under-reports spend, and it is invisible in the UI.
+// At 8 MB it was firing on an ordinary long session here and hiding 15% of the
+// total. Reading every byte of this machine's corpus costs ~50 ms more than the
+// capped read and is cached per file+mtime, so only a file being actively
+// written is ever re-read. The bound stays well under V8's ~512 MB string
+// limit, above which `toString` would throw.
+const MAX_READ_BYTES = 256 * 1024 * 1024;
 
 // First-party Anthropic list prices, USD per million tokens. cacheRead is 0.1x
 // input; cache writes are billed by TTL — 1.25x input for the 5-minute cache and
@@ -117,6 +125,19 @@ export interface SessionTotals extends TokenTotals {
   lastActivity: number;
 }
 
+// Spend rolled up by the individual prompt that caused it. Assistant turns
+// carry no prompt id of their own, so each is traced back to one — see
+// `resolvePrompts`. Subagent spend lands on the prompt whose `Agent` call
+// spawned it, so a prompt's cost is everything it set in motion.
+export interface PromptTotals extends TokenTotals {
+  prompt: string; // Claude Code's promptId
+  session: string;
+  project: string;
+  projectLabel: string;
+  models: string[];
+  lastActivity: number;
+}
+
 export interface LastTurn {
   at: number;
   model: string | null;
@@ -165,6 +186,7 @@ export interface StatusInfo {
   // burning money" rather than "which model did I spend on".
   byProject: ProjectTotals[];
   bySession: SessionTotals[];
+  byPrompt: PromptTotals[];
   lastTurn: LastTurn | null;
   // Tracked separately from lastTurn: Codex records which model ran even when
   // it records no token counts for the request.
@@ -186,6 +208,13 @@ interface Turn {
   project: string | null;
   projectLabel: string | null;
   session: string | null;
+  // The prompt this turn belongs to, when it could be resolved from the
+  // transcript itself (main-session turns).
+  prompt: string | null;
+  // Subagent turns instead carry the id of the `Agent` tool call that spawned
+  // their transcript; the owning prompt is looked up from it after every file
+  // has been parsed, since it lives in a different file.
+  viaToolUse: string | null;
   input: number;
   output: number;
   cacheRead: number;
@@ -268,6 +297,37 @@ function groupByProject(turns: Turn[]): ProjectTotals[] {
   }
   return [...byProject.values()]
     .map(({ ids, ...rest }) => ({ ...rest, sessions: ids.size }))
+    .sort(byCost);
+}
+
+function groupByPrompt(turns: Turn[]): PromptTotals[] {
+  const byPrompt = new Map<string, PromptTotals & { seen: Set<string> }>();
+  for (const turn of turns) {
+    // Turns that resolve to no prompt are left out rather than lumped into an
+    // "unknown" row — a prompt breakdown that invents a bucket is worse than
+    // one that is visibly incomplete. On this machine there are none.
+    if (!turn.prompt) continue;
+    let entry = byPrompt.get(turn.prompt);
+    if (!entry) {
+      entry = {
+        prompt: turn.prompt,
+        session: turn.session ?? "unknown",
+        project: turn.project ?? "unknown",
+        projectLabel: turn.projectLabel ?? turn.project ?? "unknown",
+        models: [],
+        lastActivity: 0,
+        seen: new Set<string>(),
+        ...emptyTotals(),
+      };
+      byPrompt.set(turn.prompt, entry);
+    }
+    if (turn.projectLabel) entry.projectLabel = turn.projectLabel;
+    if (turn.model) entry.seen.add(turn.model);
+    entry.lastActivity = Math.max(entry.lastActivity, turn.ts);
+    addTurn(entry, turn);
+  }
+  return [...byPrompt.values()]
+    .map(({ seen, ...rest }) => ({ ...rest, models: [...seen] }))
     .sort(byCost);
 }
 
@@ -356,6 +416,7 @@ function buildStatus(opts: {
     byModel: groupByModel(turns),
     byProject: groupByProject(turns),
     bySession: groupBySession(turns),
+    byPrompt: groupByPrompt(turns),
     lastTurn,
     lastModel,
     requests: Math.max(opts.requests, turns.length),
@@ -429,13 +490,67 @@ function splitCacheWrite(usage: any): { m5: number; h1: number } {
   return { m5: Math.max(m5, total - h1), h1 };
 }
 
+// What one transcript yields: its billable turns, plus the mapping needed to
+// attribute any subagent it spawned back to the right prompt.
+interface FileTurns {
+  turns: Turn[];
+  // tool_use id → owning promptId, for the `Agent` calls made in this file.
+  toolPrompts: Record<string, string>;
+  // Every tool_use id in this file. Only used for subagent transcripts: once
+  // the file's own prompt is known, every call it made inherits it, which is
+  // how an agent that spawns another agent resolves.
+  toolIds: string[];
+}
+
 function parseClaudeTurns(
   text: string,
   project: string,
   session: string,
-  cutoff: number
-): Turn[] {
+  cutoff: number,
+  // Set for `<session>/subagents/agent-*.jsonl`: the tool call that spawned it.
+  viaToolUse: string | null
+): FileTurns {
   const turns: Turn[] = [];
+  const toolPrompts: Record<string, string> = {};
+  const toolIds: string[] = [];
+  // uuid → (parent, prompt) for this file. Only the two strings are kept, not
+  // whole entries, so indexing an 18 MB transcript stays cheap.
+  const chain = new Map<string, { parent: string | null; prompt: string | null }>();
+  for (const line of text.split("\n")) {
+    if (!line.includes('"uuid"')) continue;
+    let e: any;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof e?.uuid !== "string") continue;
+    chain.set(e.uuid, {
+      parent: typeof e.parentUuid === "string" ? e.parentUuid : null,
+      prompt: typeof e.promptId === "string" ? e.promptId : null,
+    });
+  }
+
+  // Climb parentUuid until an entry that names its prompt. Measured on this
+  // machine: every assistant turn resolves, in at most a handful of hops.
+  const promptFor = (uuid: string | null): string | null => {
+    let at = uuid;
+    for (let hops = 0; at && hops < 500; hops++) {
+      const node = chain.get(at);
+      if (!node) return null;
+      if (node.prompt) return node.prompt;
+      at = node.parent;
+    }
+    return null;
+  };
+
+  // One API response is written as several JSONL lines — one per content block
+  // (thinking, text, each tool_use) — and every one of them repeats the same
+  // response-level `usage`. Counting per line therefore multiplies real spend
+  // (2.8x on the transcripts here). `message.id` is the response id: it is on
+  // every assistant entry that carries usage and never spans files, so a
+  // per-file set is enough to count each response exactly once.
+  const seen = new Set<string>();
   for (const line of text.split("\n")) {
     // cheap pre-filter — only assistant entries carry a usage block
     if (!line.includes('"usage"')) continue;
@@ -446,8 +561,23 @@ function parseClaudeTurns(
       continue;
     }
     if (entry?.type !== "assistant") continue;
+    // A subagent transcript belongs wholesale to the prompt that spawned it, so
+    // its own internal prompt ids are ignored in favour of `viaToolUse`.
+    const owner = viaToolUse ? null : promptFor(entry.uuid ?? null);
+    for (const c of entry.message?.content ?? []) {
+      if (c?.type !== "tool_use" || typeof c.id !== "string") continue;
+      toolIds.push(c.id);
+      if (owner) toolPrompts[c.id] = owner;
+    }
     const usage = entry.message?.usage;
     if (!usage || typeof usage !== "object") continue;
+    const id = entry.message?.id;
+    // No id (older transcripts): fall back to counting the line, which is what
+    // this did before — over-counting a rare entry beats dropping it.
+    if (typeof id === "string") {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
     const ts = entry.timestamp ? Date.parse(entry.timestamp) : 0;
     if (!ts || ts < cutoff) continue;
     const model = entry.message?.model;
@@ -458,6 +588,8 @@ function parseClaudeTurns(
       project,
       projectLabel: typeof entry.cwd === "string" ? entry.cwd : null,
       session,
+      prompt: owner,
+      viaToolUse,
       input: usage.input_tokens ?? 0,
       output: usage.output_tokens ?? 0,
       cacheRead: usage.cache_read_input_tokens ?? 0,
@@ -465,7 +597,67 @@ function parseClaudeTurns(
       cacheWrite1h: cache.h1,
     });
   }
-  return turns;
+  return { turns, toolPrompts, toolIds };
+}
+
+// A subagent transcript has a sibling meta naming the `Agent` tool call that
+// spawned it, which is the thread back to the prompt that asked for the work.
+// Null for ordinary session transcripts.
+const metaCache = new Map<string, { mtime: number; toolUseId: string | null }>();
+
+function agentToolUseId(transcript: string): string | null {
+  if (!/[/\\]subagents[/\\]agent-[^/\\]+\.jsonl$/.test(transcript)) return null;
+  const metaPath = transcript.replace(/\.jsonl$/, ".meta.json");
+  let mtime = 0;
+  try {
+    mtime = fs.statSync(metaPath).mtimeMs;
+  } catch {
+    return null;
+  }
+  const hit = metaCache.get(metaPath);
+  if (hit && hit.mtime === mtime) return hit.toolUseId;
+  let toolUseId: string | null = null;
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    if (typeof meta?.toolUseId === "string") toolUseId = meta.toolUseId;
+  } catch {
+    toolUseId = null;
+  }
+  metaCache.set(metaPath, { mtime, toolUseId });
+  return toolUseId;
+}
+
+// Attribute subagent turns to the prompt that spawned them. An agent can spawn
+// another agent, so this is a fixpoint rather than a single pass: once a
+// subagent's own prompt is known, every tool call it made inherits it, which
+// lets the next level down resolve. Converges in as many rounds as there are
+// nesting levels; the loop is bounded in case a meta points at a call whose
+// transcript has aged out of the lookback.
+function resolveAgentPrompts(
+  turns: Turn[],
+  toolPrompts: Record<string, string>,
+  pending: { viaToolUse: string; toolIds: string[] }[]
+): void {
+  for (let round = 0; round < 8 && pending.length > 0; round++) {
+    const stuck: typeof pending = [];
+    let progressed = false;
+    for (const file of pending) {
+      const prompt = toolPrompts[file.viaToolUse];
+      if (!prompt) {
+        stuck.push(file);
+        continue;
+      }
+      progressed = true;
+      for (const id of file.toolIds) toolPrompts[id] ??= prompt;
+    }
+    pending = stuck;
+    if (!progressed) break;
+  }
+  for (const turn of turns) {
+    if (!turn.prompt && turn.viaToolUse) {
+      turn.prompt = toolPrompts[turn.viaToolUse] ?? null;
+    }
+  }
 }
 
 function readPlan(): PlanInfo | null {
@@ -515,6 +707,12 @@ export function claudeStatus(): StatusInfo {
     projectDirs = [];
   }
 
+  // tool_use id → owning prompt, merged across every transcript, plus the
+  // subagent files still waiting on it.
+  const toolPrompts: Record<string, string> = {};
+  const pending: { viaToolUse: string; toolIds: string[] }[] = [];
+  const empty: FileTurns = { turns: [], toolPrompts: {}, toolIds: [] };
+
   for (const dir of projectDirs) {
     const projectPath = path.join(PROJECTS_DIR, dir.name);
     for (const file of walkJsonl(projectPath, [])) {
@@ -534,17 +732,21 @@ export function claudeStatus(): StatusInfo {
         .relative(projectPath, file)
         .split(path.sep)[0]
         .replace(/\.jsonl$/, "");
-      turns.push(
-        ...cachedParse(
-          file,
-          st.mtimeMs,
-          st.size,
-          (text) => parseClaudeTurns(text, dir.name, session, cutoff),
-          []
-        )
+      const viaToolUse = agentToolUseId(file);
+      const parsed = cachedParse(
+        file,
+        st.mtimeMs,
+        st.size,
+        (text) => parseClaudeTurns(text, dir.name, session, cutoff, viaToolUse),
+        empty
       );
+      turns.push(...parsed.turns);
+      Object.assign(toolPrompts, parsed.toolPrompts);
+      if (viaToolUse) pending.push({ viaToolUse, toolIds: parsed.toolIds });
     }
   }
+
+  resolveAgentPrompts(turns, toolPrompts, pending);
 
   const quota: QuotaInfo = {
     known: false,
@@ -647,6 +849,9 @@ function parseCodexFile(text: string, fallbackId: string, cutoff: number): Codex
         project: null,
         projectLabel: null,
         session: null,
+        // Codex rollouts have no prompt id, so there is nothing to group on.
+        prompt: null,
+        viaToolUse: null,
         input: used.input_tokens ?? 0,
         output: used.output_tokens ?? 0,
         cacheRead: used.cached_input_tokens ?? 0,

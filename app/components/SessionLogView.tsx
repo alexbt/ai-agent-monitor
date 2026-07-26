@@ -14,15 +14,25 @@ import {
 import { useCosts, fmtCost, type Costs } from "@/lib/useCosts";
 import SessionTrace from "./SessionTrace";
 
-// Estimated spend for one session over the status page's 7-day lookback.
-// Absent for sessions that saw no priced traffic in that window.
-function CostBadge({ costs, sessionId }: { costs: Costs; sessionId: string }) {
-  const totals = costs.bySession.get(sessionId);
+// Estimated spend over the status page's 7-day lookback — for a whole session,
+// or for the single prompt that caused it. Absent when nothing priced landed in
+// that window.
+function CostBadge({
+  totals,
+  what,
+}: {
+  totals: { cost: number; turns: number } | undefined;
+  what: "session" | "prompt";
+}) {
   if (!totals || totals.cost === 0) return null;
+  const scope =
+    what === "prompt"
+      ? "this prompt, including any agents it spawned"
+      : "this session";
   return (
     <span
       className="badge cost"
-      title={`Estimated spend over the last 7 days · ${totals.turns.toLocaleString()} requests`}
+      title={`Estimated spend for ${scope} · ${totals.turns.toLocaleString()} requests`}
     >
       {fmtCost(totals.cost)}
     </span>
@@ -53,6 +63,7 @@ function PromptCard({
   total,
   now,
   provider,
+  costs,
   expanded,
   onToggle,
 }: {
@@ -61,6 +72,7 @@ function PromptCard({
   total: number;
   now: number;
   provider: Provider;
+  costs: Costs;
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -88,6 +100,10 @@ function PromptCard({
           </span>
         )}
         {session.gitBranch && <span className="badge">{session.gitBranch}</span>}
+        <CostBadge
+          totals={prompt.id ? costs.byPrompt.get(prompt.id) : undefined}
+          what="prompt"
+        />
         <span className="time">
           {prompt.ts ? timeAgo(prompt.ts, now) : timeAgo(session.lastActivity, now)}
         </span>
@@ -163,7 +179,7 @@ function SessionCard({
           </span>
         )}
         {session.gitBranch && <span className="badge">{session.gitBranch}</span>}
-        <CostBadge costs={costs} sessionId={session.id} />
+        <CostBadge totals={costs.bySession.get(session.id)} what="session" />
         <span className="time">{timeAgo(session.lastActivity, now)}</span>
         {session.agents.length > 0 && (
           <span className="agent-count">
@@ -520,6 +536,7 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
                   total={total}
                   now={now}
                   provider={provider}
+                  costs={costs}
                   expanded={expandedId === key}
                   onToggle={() =>
                     setExpandedId((cur) => (cur === key ? null : key))

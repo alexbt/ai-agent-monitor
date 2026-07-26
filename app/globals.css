@@ -507,6 +507,13 @@ h2 .section-count {
   background: #d95757;
 }
 
+/* Every cell is nowrap, so on a narrow window the table has to scroll inside
+   its own box — otherwise it widens the document and drags the sticky header
+   out of register with it. */
+.table-scroll {
+  overflow-x: auto;
+}
+
 .usage-table {
   width: 100%;
   border-collapse: collapse;
@@ -515,10 +522,21 @@ h2 .section-count {
 
 .usage-table th,
 .usage-table td {
-  padding: 7px 10px;
+  padding: 7px 8px;
   border-bottom: 1px solid var(--border);
   text-align: left;
   white-space: nowrap;
+}
+
+/* The seven numeric columns size to their content; the label column takes
+   whatever is left, so the table fits the content width instead of forcing the
+   page to scroll. `max-width: 0` is what makes a percentage width bind on a
+   table cell — without it the cell grows to fit its text and the ellipsis in
+   `.row-label` never engages. */
+.usage-table th:first-child,
+.usage-table td:first-child {
+  width: 34%;
+  max-width: 0;
 }
 
 .usage-table th {
@@ -548,15 +566,15 @@ h2 .section-count {
   font-weight: 400;
 }
 
-/* Two-line first cell: the thing being measured, plus what identifies it.
-   A session title can be a whole opening prompt, so it is clipped rather than
-   allowed to push the numeric columns off the page. */
+/* Stacked first cell: the thing being measured, what identifies it, and links
+   into the other views. A prompt's text can be a whole paragraph, so it is
+   clipped to the column rather than allowed to push the numbers off the page —
+   the full text is in the cell's tooltip. */
 .row-label {
   display: flex;
   flex-direction: column;
   gap: 1px;
   min-width: 0;
-  max-width: 340px;
 }
 
 .row-label > * {
@@ -609,11 +627,13 @@ h2.with-actions .seg {
   border-top: 1px solid var(--border);
 }
 
-/* Cross-view links, shown only on the session breakdown. */
-.row-actions {
+/* Cross-view links, stacked under the row's label. Kept out of the label's
+   ellipsis clipping, which applies to the text lines above them. */
+.row-label > .row-actions {
   display: flex;
   gap: 6px;
-  justify-content: flex-end;
+  margin-top: 5px;
+  overflow: visible;
 }
 
 /* The row a ?session=… link pointed at, matching the trace panel's focus tint. */

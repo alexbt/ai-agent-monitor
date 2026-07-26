@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import type { StatusInfo, TokenTotals } from "@/lib/status";
 import { fmtCost } from "@/lib/useCosts";
+import { usePrompts } from "@/lib/usePrompts";
 import {
   useSnapshot,
   fmtDuration,
@@ -134,21 +135,11 @@ function TotalsCells({ totals }: { totals: TokenTotals }) {
   );
 }
 
-function TotalsRow({
-  label,
-  totals,
-  pad,
-}: {
-  label: string;
-  totals: TokenTotals;
-  // Keep the footer aligned when the breakdown adds a trailing actions column.
-  pad?: boolean;
-}) {
+function TotalsRow({ label, totals }: { label: string; totals: TokenTotals }) {
   return (
     <tr>
       <td>{label}</td>
       <TotalsCells totals={totals} />
-      {pad && <td />}
     </tr>
   );
 }
@@ -159,12 +150,13 @@ function shortPath(p: string): string {
   return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : p;
 }
 
-type Breakdown = "model" | "project" | "session";
+type Breakdown = "model" | "project" | "session" | "prompt";
 
 const BREAKDOWN_LABEL: Record<Breakdown, string> = {
   model: "Model",
   project: "Project",
   session: "Session",
+  prompt: "Prompt",
 };
 
 export default function StatusView({ provider }: { provider: Provider }) {
@@ -178,6 +170,7 @@ export default function StatusView({ provider }: { provider: Provider }) {
   // Usage aggregates carry no session title — the snapshot does, so name the
   // rows from it rather than making the cost pass re-read every header.
   const { snapshot } = useSnapshot(30_000, provider);
+  const { prompts } = usePrompts(provider, breakdown === "prompt");
   // What ?session=… (and optionally &prompt=…) named on arrival from another
   // view: the row to scroll to and highlight, and the prompt to hand back when
   // linking onward.
@@ -254,6 +247,18 @@ export default function StatusView({ provider }: { provider: Provider }) {
   const logHref = provider === "codex" ? "/codex" : "/claude";
   const officeHref = provider === "codex" ? "/codex/visual" : "/visual";
 
+  // Prompt text lives with the prompts endpoint, not the usage pass — same
+  // split as session titles above. Only fetched when that breakdown is showing.
+  const promptText = useMemo(() => {
+    const map = new Map<string, { text: string; n: number; total: number }>();
+    for (const list of Object.values(prompts)) {
+      for (const p of list) {
+        if (p.id) map.set(p.id, { text: p.text, n: p.n, total: list.length });
+      }
+    }
+    return map;
+  }, [prompts]);
+
   const titles = useMemo(() => {
     const map = new Map<string, string>();
     for (const p of snapshot?.projects ?? []) {
@@ -262,12 +267,13 @@ export default function StatusView({ provider }: { provider: Provider }) {
     return map;
   }, [snapshot]);
 
-  // One shape for all three breakdowns: a first cell plus the shared totals.
-  // Only sessions can be opened elsewhere, so only they carry `actions`.
+  // One shape for every breakdown: a first cell plus the shared totals. The
+  // prompt and session cells also carry links into the other views, stacked
+  // under the label rather than in a column of their own — an extra column is
+  // what pushed the table into needing horizontal scroll.
   const rows = useMemo((): {
     key: string;
     cell: ReactNode;
-    actions?: ReactNode;
     totals: TokenTotals;
   }[] => {
     if (!status) return [];
@@ -296,6 +302,49 @@ export default function StatusView({ provider }: { provider: Provider }) {
         totals: r,
       }));
     }
+    if (breakdown === "prompt") {
+      return status.byPrompt.map((r) => {
+        const p = promptText.get(r.prompt);
+        const target =
+          `session=${encodeURIComponent(r.session)}` + (p ? `&prompt=${p.n}` : "");
+        return {
+          key: r.prompt,
+          cell: (
+            <span
+              className="row-label"
+              title={`${p ? `${p.text}\n\n` : ""}${titles.get(r.session) ?? r.session}\n${r.projectLabel}`}
+            >
+              {/* Prompts the human didn't type (hook output, task
+                  notifications) have real spend but no row in the prompts
+                  endpoint — name them by id rather than dropping them. */}
+              <span>{p ? p.text : `(untyped prompt ${shortId(r.prompt)})`}</span>
+              <span className="row-sub">
+                {p ? `${p.n}/${p.total} · ` : ""}
+                {titles.get(r.session) ?? shortId(r.session)} ·{" "}
+                {timeAgo(r.lastActivity, now)}
+              </span>
+              <span className="row-actions">
+                <Link
+                  className="nav-btn sm"
+                  href={`${officeHref}?${target}`}
+                  title="Open this prompt in the Office View"
+                >
+                  🏢 Office
+                </Link>
+                <Link
+                  className="nav-btn sm"
+                  href={`${logHref}?${target}`}
+                  title="Open this prompt in the Session Log"
+                >
+                  ☰ Log
+                </Link>
+              </span>
+            </span>
+          ),
+          totals: r,
+        };
+      });
+    }
     return status.bySession.map((r) => {
       const title = titles.get(r.session);
       // Only the session we were deep-linked to has a prompt to hand back.
@@ -317,33 +366,30 @@ export default function StatusView({ provider }: { provider: Provider }) {
               {r.models.map((m) => modelLabel(m)).join(", ") || "model unknown"} ·{" "}
               {timeAgo(r.lastActivity, now)}
             </span>
-          </span>
-        ),
-        actions: (
-          <span className="row-actions">
-            <Link
-              className="nav-btn sm"
-              href={`${officeHref}?${target}`}
-              title="Open this session in the Office View"
-            >
-              🏢 Office
-            </Link>
-            <Link
-              className="nav-btn sm"
-              href={`${logHref}?${target}`}
-              title="Open this session in the Session Log"
-            >
-              ☰ Log
-            </Link>
+            <span className="row-actions">
+              <Link
+                className="nav-btn sm"
+                href={`${officeHref}?${target}`}
+                title="Open this session in the Office View"
+              >
+                🏢 Office
+              </Link>
+              <Link
+                className="nav-btn sm"
+                href={`${logHref}?${target}`}
+                title="Open this session in the Session Log"
+              >
+                ☰ Log
+              </Link>
+            </span>
           </span>
         ),
         totals: r,
       };
     });
-  }, [status, breakdown, logHref, officeHref, now, titles, focus]);
+  }, [status, breakdown, logHref, officeHref, now, titles, promptText, focus]);
 
   const visible = showAll ? rows : rows.slice(0, TOP_ROWS);
-  const hasActions = breakdown === "session";
   // A session linked from another view but absent here spent nothing priced in
   // the lookback — say so rather than showing an unhighlighted table.
   const focusMissing =
@@ -545,7 +591,7 @@ export default function StatusView({ provider }: { provider: Provider }) {
             <h2 className="with-actions">
               Usage · last 7 days
               <div className="seg" role="group" aria-label="Break usage down by">
-                {(["session", "project", "model"] as const).map((b) => (
+                {(["prompt", "session", "project", "model"] as const).map((b) => (
                   <button
                     key={b}
                     className={`seg-btn ${breakdown === b ? "on" : ""}`}
@@ -575,7 +621,8 @@ export default function StatusView({ provider }: { provider: Provider }) {
                   : "No requests recorded in the last 7 days."}
               </p>
             ) : (
-              <table className="usage-table">
+              <div className="table-scroll">
+                <table className="usage-table">
                 <thead>
                   <tr>
                     <th>{BREAKDOWN_LABEL[breakdown]}</th>
@@ -586,11 +633,10 @@ export default function StatusView({ provider }: { provider: Provider }) {
                     <th className="num">Cache read</th>
                     <th className="num">Total</th>
                     <th className="num">Est. cost</th>
-                    {hasActions && <th />}
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.map(({ key, cell, actions, totals }) => (
+                  {visible.map(({ key, cell, totals }) => (
                     <tr
                       key={key}
                       id={`usage-${key}`}
@@ -598,19 +644,15 @@ export default function StatusView({ provider }: { provider: Provider }) {
                     >
                       <td>{cell}</td>
                       <TotalsCells totals={totals} />
-                      {hasActions && <td>{actions}</td>}
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
-                  <TotalsRow label="Today" totals={status.today} pad={hasActions} />
-                  <TotalsRow
-                    label="Last 7 days"
-                    totals={status.sevenDay}
-                    pad={hasActions}
-                  />
+                  <TotalsRow label="Today" totals={status.today} />
+                  <TotalsRow label="Last 7 days" totals={status.sevenDay} />
                 </tfoot>
-              </table>
+                </table>
+              </div>
             )}
             {rows.length > TOP_ROWS && (
               <button

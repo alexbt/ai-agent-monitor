@@ -550,9 +550,23 @@ export default function OfficeView({ provider }: { provider: Provider }) {
     sessions[0] ??
     null;
 
-  const sessionTotals = selected ? costs.bySession.get(selected.id) : undefined;
-  const sessionCost =
-    sessionTotals && sessionTotals.cost > 0 ? sessionTotals : null;
+  // In prompts mode the header describes one prompt, so show that prompt's own
+  // spend (agents it spawned included); in sessions mode, the whole session's.
+  const promptId =
+    mode === "prompts" &&
+    selectedChoice !== null &&
+    selectedChoice.session.id === selected?.id
+      ? selectedChoice.prompt.id
+      : null;
+  const totals =
+    mode === "prompts"
+      ? promptId
+        ? costs.byPrompt.get(promptId)
+        : undefined
+      : selected
+        ? costs.bySession.get(selected.id)
+        : undefined;
+  const spend = totals && totals.cost > 0 ? totals : null;
 
   // Carried on every cross-view link so the other view lands on the same turn.
   const promptParam =
@@ -679,12 +693,16 @@ export default function OfficeView({ provider }: { provider: Provider }) {
                 </span>
               )}
               {selected.gitBranch && <span className="badge">{selected.gitBranch}</span>}
-              {mode === "sessions" && sessionCost !== null && (
+              {spend !== null && (
                 <span
                   className="badge cost"
-                  title={`Estimated spend over the last 7 days · ${sessionCost.turns.toLocaleString()} requests`}
+                  title={`Estimated spend for ${
+                    mode === "prompts"
+                      ? "this prompt, including any agents it spawned"
+                      : "this session"
+                  } · ${spend.turns.toLocaleString()} requests`}
                 >
-                  {fmtCost(sessionCost.cost)}
+                  {fmtCost(spend.cost)}
                 </span>
               )}
               {/* Same session (and prompt, in prompts mode) in the other views. */}

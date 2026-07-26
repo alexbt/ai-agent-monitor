@@ -14,7 +14,7 @@ Claude Code writes every session, subagent, and teammate transcript to `~/.claud
 
   ![Office View](docs/office-view.png)
 
-- **Status** — plan, the current 5-hour window, and token/dollar usage over the last 7 days, broken down by **session**, **project**, or **model**. Session and project answer "which of my six sessions is burning money"; sessions are listed by title and link straight into the Session Log. Spend also shows up where you browse: a cost badge on each session in the Session Log and Office View, and a 7-day total on every project heading. Sessions mode only — against a single prompt a session's total would read as that prompt's cost.
+- **Status** — plan, the current 5-hour window, and token/dollar usage over the last 7 days, broken down by **prompt**, **session**, **project**, or **model**. Prompt and session answer "which of these is burning money"; rows are listed by their text or title and link straight into the other views. Spend also shows up where you browse: a cost badge on every prompt row and session card in the Session Log, the same in the Office View, and a 7-day total on each project heading.
 
 Everything is read-only: the app never talks to Claude or Codex and never modifies any files — it only tails transcripts.
 
@@ -68,7 +68,7 @@ Without make: `npm install`, then `npm run dev`.
 ```
 
 - `lib/scanner.ts` scans the Claude tree and builds a snapshot: projects → sessions (first prompt, git branch, teammate name/team) → agents (type, description, activity). "Active" means the transcript was written in the last 60 seconds. Recent transcript tails are parsed for communication events (teammate messages, `SendMessage`/`Agent` tool calls, current tool usage).
-- `lib/status.ts` is the usage/cost pass: plan details from `~/.claude.json` (or the Codex `auth.json` id_token), quota from Codex's `rate_limits` events, and seven days of `usage` blocks aggregated by model, project, and session. Parse output is cached per file+mtime, so an idle transcript is read once. `lib/useCosts.ts` is the client half — it polls `/api/status` so the Session Log can show per-session and per-project spend.
+- `lib/status.ts` is the usage/cost pass: plan details from `~/.claude.json` (or the Codex `auth.json` id_token), quota from Codex's `rate_limits` events, and seven days of `usage` blocks aggregated by model, project, session and prompt. Parse output is cached per file+mtime, so an idle transcript is read once. `lib/useCosts.ts` is the client half — it polls `/api/status` so the other views can show spend inline.
 - `lib/codex.ts` does the same for Codex rollouts, mapping them into the identical snapshot shape (sessions grouped by working directory, titles from Codex's `session_index.jsonl`), so the whole UI is provider-agnostic.
 - `app/api/stream/route.ts` polls the selected provider's scanner every 2s and pushes snapshots to the browser over Server-Sent Events (only when something changed; one shared scan across all clients).
 - `app/api/trace/route.ts` streams a session's full conversation, then tails the file by byte offset for live updates; it parses whichever transcript format the provider uses into the same trace items. `lib/traceDetail.ts` turns each entry's `toolUseResult` into a typed payload the panel can render properly (see below).
@@ -97,7 +97,11 @@ Without make: `npm install`, then `npm run dev`.
 
   Only models with confirmed pricing are priced (Opus 5 and 4.5–4.8, Sonnet 5 and 4.5/4.6, Haiku 4.5, Fable/Mythos 5); anything else — Codex/OpenAI models, older tiers on different rates — contributes tokens but no dollars, and the count of those requests is surfaced rather than silently folded into the total. Costs come from `/api/status` on a 30-second poll, not the 2-second snapshot scan, because collecting them means reading every transcript end to end.
 
-  A session's subagent transcripts count against the session that spawned them: an agent burns tokens on the session's behalf, so `<session>/subagents/agent-*.jsonl` rolls up into `<session>`.
+  **One response, not one line.** A single API response is written to the transcript as several JSONL lines — one per content block (thinking, text, each tool call) — and every one repeats the same response-level `usage`. Counting per line multiplied real spend by 2.8x here, so turns are deduplicated on `message.id`, which is present on every assistant entry carrying usage and never spans files.
+
+  **Per-prompt attribution.** Assistant turns carry no prompt id of their own, but every `user` entry does (`promptId`), and each turn reaches one by walking `parentUuid` — on this machine every turn resolves, in at most a handful of hops. Subagent spend is attributed through a second hop: `agent-*.meta.json` names the `Agent` tool call that spawned the transcript, and that call belongs to a prompt. Because an agent can spawn an agent, the resolve is a fixpoint rather than a single pass. The check that it is complete is that the per-prompt costs sum to exactly the seven-day total.
+
+  A session's subagent transcripts count against the session that spawned them: an agent burns tokens on the session's behalf, so `<session>/subagents/agent-*.jsonl` rolls up into `<session>`. The same tokens roll up into the prompt that asked for the work, which is why an agent-spawning prompt costs far more than its own handful of turns suggests.
 
   Usage aggregates carry no session title — the snapshot already does, so the Status table names its rows from that rather than making the cost pass re-read every transcript header. `sessionLabel()` in `lib/useSnapshot.ts` is the shared naming rule (teammate name → LLM title → opening prompt → id), so a session reads the same everywhere it appears.
 - Communication arrows and labels come from transcript tails within a ~90-second window — they visualize recent flow, not the full message history (the trace panel has that).

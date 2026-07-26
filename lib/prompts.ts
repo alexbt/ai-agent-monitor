@@ -10,6 +10,10 @@ export interface Prompt {
   n: number; // 1-based position within the session
   text: string;
   ts: number;
+  // Claude Code's own id for this prompt (`promptId`). Every assistant turn it
+  // caused can be traced back to it, which is what per-prompt cost joins on.
+  // Null for Codex, which has no equivalent.
+  id: string | null;
 }
 
 const MAX_TEXT = 300;
@@ -79,7 +83,7 @@ const cache = new Map<string, Cached>();
 // the text heuristics are skipped — they exist only for older formats.
 type LineParser = (
   entry: any
-) => { text: string; ts: number; trusted: boolean } | null;
+) => { text: string; ts: number; trusted: boolean; id: string | null } | null;
 
 function readIncremental(filePath: string, parseLine: LineParser): Prompt[] {
   let size = 0;
@@ -130,7 +134,12 @@ function readIncremental(filePath: string, parseLine: LineParser): Prompt[] {
     if (!hit) continue;
     if (hit.trusted ? !hit.text.trim() : !isRealPrompt(hit.text)) continue;
     if (prompts.length >= MAX_PER_SESSION) break;
-    prompts.push({ n: prompts.length + 1, text: clean(hit.text), ts: hit.ts });
+    prompts.push({
+      n: prompts.length + 1,
+      text: clean(hit.text),
+      ts: hit.ts,
+      id: hit.id,
+    });
   }
 
   const next = { consumed, prompts };
@@ -160,6 +169,7 @@ const claudeLine: LineParser = (entry) => {
     text,
     ts: entry.timestamp ? Date.parse(entry.timestamp) : 0,
     trusted: source === "typed",
+    id: typeof entry.promptId === "string" ? entry.promptId : null,
   };
 };
 
@@ -175,6 +185,7 @@ const codexLine: LineParser = (entry) => {
     text,
     ts: entry.timestamp ? Date.parse(entry.timestamp) : 0,
     trusted: false,
+    id: null,
   };
 };
 

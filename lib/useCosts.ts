@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ProjectTotals, SessionTotals, StatusInfo } from "./status";
+import type {
+  ProjectTotals,
+  PromptTotals,
+  SessionTotals,
+  StatusInfo,
+} from "./status";
 import type { Provider } from "./useSnapshot";
 
 // Costs come from /api/status, which walks every transcript end to end — much
@@ -11,6 +16,8 @@ const POLL_MS = 30_000;
 export interface Costs {
   bySession: Map<string, SessionTotals>;
   byProject: Map<string, ProjectTotals>;
+  /** Keyed by `promptId`, which `Prompt.id` carries for the join. */
+  byPrompt: Map<string, PromptTotals>;
   /** Seven days — anything older than the status lookback has no entry. */
   loaded: boolean;
 }
@@ -18,6 +25,7 @@ export interface Costs {
 const EMPTY: Costs = {
   bySession: new Map(),
   byProject: new Map(),
+  byPrompt: new Map(),
   loaded: false,
 };
 
@@ -37,6 +45,7 @@ export function useCosts(provider: Provider): Costs {
         setCosts({
           bySession: new Map(data.bySession.map((s) => [s.session, s])),
           byProject: new Map(data.byProject.map((p) => [p.project, p])),
+          byPrompt: new Map((data.byPrompt ?? []).map((p) => [p.prompt, p])),
           loaded: true,
         });
       } catch {
