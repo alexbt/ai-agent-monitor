@@ -3,6 +3,7 @@ import path from "path";
 import os from "os";
 import type { TraceItem } from "@/lib/scanner";
 import { codexSessionPath, makeCodexParser } from "@/lib/codex";
+import { typedPromptText } from "@/lib/prompts";
 import {
   MAX_SUMMARY,
   MAX_TEXT,
@@ -21,6 +22,8 @@ const POLL_INTERVAL_MS = 1500;
 // factory: one parser per open connection.
 function makeClaudeParser(): (lines: string[]) => TraceItem[] {
   const toolNames = new Map<string, string>();
+  // Numbers the prompts you typed, in order, so the panel can walk between them.
+  let promptCount = 0;
 
   return (lines: string[]): TraceItem[] => {
     const items: TraceItem[] = [];
@@ -35,15 +38,35 @@ function makeClaudeParser(): (lines: string[]) => TraceItem[] {
       const content = entry?.message?.content;
 
       if (entry?.type === "user") {
+        // Consumed by whichever user item this entry produces first, so the
+        // number lands on the prompt itself and not on a later text block.
+        let promptN =
+          typedPromptText(entry, "claude") !== null ? ++promptCount : undefined;
+        const takeN = () => {
+          const n = promptN;
+          promptN = undefined;
+          return n;
+        };
         if (typeof content === "string") {
-          items.push({ kind: "user", text: content.slice(0, MAX_TEXT), ts });
+          items.push({
+            kind: "user",
+            text: content.slice(0, MAX_TEXT),
+            ts,
+            ...(takeN() ? { promptN: promptCount } : {}),
+          });
         } else if (Array.isArray(content)) {
           // `toolUseResult` sits on the entry rather than inside the block, so
           // it belongs to the first tool_result here — in practice the only one.
           let detail = resultDetail(entry.toolUseResult);
           for (const c of content) {
             if (c?.type === "text" && c.text?.trim()) {
-              items.push({ kind: "user", text: c.text.slice(0, MAX_TEXT), ts });
+              const n = takeN();
+              items.push({
+                kind: "user",
+                text: c.text.slice(0, MAX_TEXT),
+                ts,
+                ...(n ? { promptN: n } : {}),
+              });
             } else if (c?.type === "tool_result") {
               const raw =
                 typeof c.content === "string"

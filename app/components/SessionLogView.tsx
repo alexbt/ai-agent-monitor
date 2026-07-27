@@ -186,6 +186,7 @@ function PromptCard({
           sessionId={session.id}
           provider={provider}
           focusText={prompt.text}
+          focusPromptN={prompt.n}
         />
       )}
     </div>
@@ -608,7 +609,9 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
             <h2>
               {project.displayName}
               <span className="section-count">
-                {projectCost(project.name)}
+                {project.sessions.length} session
+                {project.sessions.length === 1 ? "" : "s"}
+                {projectCost(project.name) && ` · ${projectCost(project.name)}`}
               </span>
             </h2>
             {project.sessions.map((s) => (

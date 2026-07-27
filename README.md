@@ -2,7 +2,22 @@
 
 A real-time dashboard for watching [Claude Code](https://claude.com/claude-code) and [OpenAI Codex CLI](https://github.com/openai/codex) sessions and their agents work.
 
-> Formerly known as *Claude Agent Monitor* / *claude-ui* — the repo was renamed to **ai-agent-monitor** when Codex support was added.
+
+## Getting started
+
+```bash
+git clone https://github.com/alexbt/ai-agent-monitor
+cd ai-agent-monitor
+make start          # installs, builds, and serves at http://localhost:3000
+```
+
+`make start` pulls in whatever is missing, so that one command is enough from a
+fresh clone. Dependencies are installed only when `node_modules` is absent or
+`package.json` has changed since, so re-running it doesn't reinstall.
+
+Then open **http://localhost:3000**. Start a Claude Code or Codex session (or spawn agents/teammates) in any terminal and watch it appear within a couple of seconds.
+
+## Overview
 
 Claude Code writes every session, subagent, and teammate transcript to `~/.claude/projects/` (Codex writes rollouts to `~/.codex/sessions/`). This app watches those files and turns them into live views. The sidebar has a **Claude** and a **Codex** section, each offering the same three views:
 
@@ -34,25 +49,21 @@ Runtime dependencies are just Next.js and React (installed via npm):
 | react / react-dom | ^19 |
 | typescript (dev) | ^5 |
 
-## Getting started
-
-```bash
-git clone https://github.com/alexbt/ai-agent-monitor
-cd ai-agent-monitor
-make install        # npm install
-make dev            # launch at http://localhost:3000
-```
-
-Then open **http://localhost:3000**. Start a Claude Code or Codex session (or spawn agents/teammates) in any terminal and watch it appear within a couple of seconds.
-
 ### Makefile targets
 
 | Target | What it does |
 |---|---|
-| `make install` | install dependencies |
+| `make install` | install dependencies (implied by the targets below) |
 | `make dev` | run in development mode with hot reload (port 3000) |
 | `make build` | production build |
-| `make start` | serve the production build (`make build` first) |
+| `make start` | install if needed, build, then serve it in production mode |
+| `make stop` | stop a server started by `dev` or `start` (`make stop PORT=3001` for another port) |
+
+Ctrl-C stops `make dev` / `make start` cleanly. It needs help to do so: make's recipe
+shell swallows the interrupt, and `next` then shuts down *gracefully* — draining open
+connections, which never completes because an open dashboard tab holds SSE streams
+indefinitely. Both targets therefore trap the interrupt and stop the server outright,
+clearing the `next-server` worker that would otherwise be orphaned and keep the port.
 | `make clean` | remove build artifacts (`.next`, TS build cache) |
 
 Without make: `npm install`, then `npm run dev`.
@@ -126,7 +137,14 @@ Without make: `npm install`, then `npm run dev`.
 
   What is *not* counted is `is_error`. Ordinary tool errors — a stale string in an edit, a failed grep, a typo in a command — are retried and fixed on the next call, and they are common: on this machine they appear in **31% of prompts and 5 of 6 sessions**, which would make the badge wallpaper. The three signals above land on **17%** of prompts and name what actually happened (`1 rejected`, `1 timed out`) rather than implying the prompt failed. Sessions get no chip at all — over hundreds of turns something always goes wrong, so that granularity can only ever be noise.
 
-  Inside the trace the rule flips: there, `↑ n failed ↓` walks every errored tool call, wrapping in both directions. When you are already reading a 10,000-row trace, finding the red rows is the whole job, and it pollutes no list.
+  Inside the trace, failed tool calls are still marked — a red left border and role label on the row, with `is_error` carried through from the transcript — but they get no counter or jump control in the toolbar.
+- **Walking a session** — the trace toolbar reads `7/25 prompts`, with arrows either side that step between them (wrapping at both ends). A long session is mostly tool traffic, so turn-to-turn is the only practical way to move through it.
+
+  The current index tracks scrolling as well as the arrows: it is the last prompt whose turn begins at or above the **middle** of the box, recomputed from live geometry (one frame at most) rather than remembered, so expanding a diff or streaming new rows can't desynchronise it. The middle rather than the top because that is where a focused prompt gets scrolled to — measuring at the top reports the previous prompt for the very row being highlighted. Centring the jump target also guarantees every later prompt sits below the middle, so the counter lands on exactly the prompt you asked for. Scrolling re-anchors the arrows too, so *next* means the prompt after the one you are reading.
+
+  Opening the trace from a prompt row jumps to that turn **by number** (`promptN`), not by matching its text. The old text match compared a 60-character prefix and took the first hit, which lands on the wrong turn whenever two prompts open the same way — and in practice they often do.
+
+  The trace stream numbers those turns using `typedPromptText()` from `lib/prompts.ts` — the same test the prompt list uses. Sharing it matters: the trace's "24 prompts" and the list's row count are the same claim, and injected `user` traffic (task notifications, hook output) arrives through the same channel and must not be counted as something you said. Numbered turns render as `user · prompt 3` so a jump lands somewhere recognisable.
 
   Friction is attributed by file order rather than by walking `parentUuid` as cost does — transcripts are written in sequence, so an event belongs to the most recent prompt seen, which `lib/prompts.ts` already tracks as it parses incrementally.
 - Communication arrows and labels come from transcript tails within a ~90-second window — they visualize recent flow, not the full message history (the trace panel has that).

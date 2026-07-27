@@ -8,6 +8,7 @@ import type {
   ToolDetail,
   TraceItem,
 } from "./scanner";
+import { typedPromptText } from "./prompts";
 import {
   MAX_SUMMARY,
   MAX_TEXT,
@@ -272,6 +273,8 @@ function codexResultDetail(output: unknown): ToolDetail | undefined {
 // take a fresh parser per connection.
 export function makeCodexParser(): (lines: string[]) => TraceItem[] {
   const toolNames = new Map<string, string>();
+  // Same numbering the Claude parser applies, so the panel behaves identically.
+  let promptCount = 0;
 
   return (lines: string[]): TraceItem[] => {
     const items: TraceItem[] = [];
@@ -297,10 +300,13 @@ export function makeCodexParser(): (lines: string[]) => TraceItem[] {
         if (!text || /^<(permissions|environment_context|user_instructions)/.test(text)) {
           continue;
         }
+        const isPrompt =
+          p.role === "user" && typedPromptText(entry, "codex") !== null;
         items.push({
           kind: p.role === "user" ? "user" : "assistant",
           text: text.slice(0, MAX_TEXT),
           ts,
+          ...(isPrompt ? { promptN: ++promptCount } : {}),
         });
       } else if (p.type === "function_call") {
         const name = p.name ?? "tool";

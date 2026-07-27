@@ -218,6 +218,9 @@ function expandable(item: TraceItem): ToolDetail | undefined {
 function roleLabel(item: TraceItem): string {
   if (item.kind === "tool") return `🔧 ${item.name ?? "tool"}`;
   if (item.kind === "tool_result") return `↳ ${item.name ?? "result"}`;
+  // Numbering the turns you typed makes a jump land somewhere recognisable, and
+  // tells the injected "user" traffic apart from the things you actually said.
+  if (item.promptN) return `user · prompt ${item.promptN}`;
   return item.kind;
 }
 
@@ -308,13 +311,16 @@ export default function SessionTrace({
   sessionId,
   provider = "claude",
   focusText,
+  focusPromptN,
 }: {
   project: string;
   sessionId: string;
   provider?: "claude" | "codex";
   // When the trace is opened from a specific prompt, scroll to that turn
-  // instead of tailing the bottom.
+  // instead of tailing the bottom. The number is exact; the text is the
+  // fallback for a transcript whose turns could not be numbered.
   focusText?: string | null;
+  focusPromptN?: number | null;
 }) {
   const [items, setItems] = useState<TraceItem[]>([]);
   const [failed, setFailed] = useState(false);
@@ -328,13 +334,17 @@ export default function SessionTrace({
   // and highlighted while the user reads.
   const [focusIdx, setFocusIdx] = useState<number | null>(null);
   const focusDone = useRef<string | null>(null);
-  // Where the error walker last stopped, so next/prev resume from there.
-  const errorCursor = useRef(-1);
+  // Where the prompt walker last stopped, so next/prev resume from there.
+  const promptCursor = useRef(-1);
+  const [currentPrompt, setCurrentPrompt] = useState<number | null>(null);
+  const scrollTick = useRef<number | null>(null);
 
   useEffect(() => {
     setItems([]);
     setFailed(false);
     setOpenIdx(new Set());
+    setCurrentPrompt(null);
+    promptCursor.current = -1;
     followRef.current = true;
     const es = new EventSource(
       provider === "codex"
@@ -371,21 +381,31 @@ export default function SessionTrace({
     return () => window.removeEventListener("keydown", onKey);
   }, [fullscreen]);
 
-  // Locate the focused prompt once its turn has streamed in. Prompt text is
-  // whitespace-collapsed and truncated for display, so match on a prefix of it.
+  // Locate the focused prompt once its turn has streamed in.
+  //
+  // By number when the turns could be numbered — the text fallback matches on a
+  // 60-character prefix and takes the first hit, which lands on the wrong turn
+  // whenever two prompts open the same way ("address: ...", "in office view,
+  // ..."), and that is common.
   useEffect(() => {
-    if (!focusText || focusDone.current === focusText || items.length === 0) {
-      return;
+    const key = focusPromptN != null ? `#${focusPromptN}` : focusText;
+    if (!key || focusDone.current === key || items.length === 0) return;
+    let idx = -1;
+    if (focusPromptN != null) {
+      idx = items.findIndex((it) => it.promptN === focusPromptN);
     }
-    const needle = focusText.replace(/…$/, "").slice(0, 60).toLowerCase();
-    if (!needle) return;
-    const idx = items.findIndex(
-      (it) =>
-        it.kind === "user" &&
-        it.text.replace(/\s+/g, " ").toLowerCase().includes(needle)
-    );
+    if (idx === -1 && focusText) {
+      const needle = focusText.replace(/…$/, "").slice(0, 60).toLowerCase();
+      if (needle) {
+        idx = items.findIndex(
+          (it) =>
+            it.kind === "user" &&
+            it.text.replace(/\s+/g, " ").toLowerCase().includes(needle)
+        );
+      }
+    }
     if (idx === -1) return;
-    focusDone.current = focusText;
+    focusDone.current = key;
     setFocusIdx(idx);
     // Wait for the row to render before scrolling to it. Only the trace box
     // scrolls: scrollIntoView would also scroll every ancestor, which in the
@@ -397,12 +417,18 @@ export default function SessionTrace({
       const delta = row.getBoundingClientRect().top - box.getBoundingClientRect().top;
       box.scrollTop += delta - (box.clientHeight - row.clientHeight) / 2;
     });
-  }, [items, focusText]);
+  }, [items, focusText, focusPromptN]);
 
   const onScroll = () => {
     const el = boxRef.current;
     if (!el) return;
     followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    // One recompute per frame: scroll fires far faster than it can be useful.
+    if (scrollTick.current !== null) return;
+    scrollTick.current = requestAnimationFrame(() => {
+      scrollTick.current = null;
+      syncCurrent();
+    });
   };
 
   const toggle = useCallback((idx: number) => {
@@ -430,35 +456,82 @@ export default function SessionTrace({
   );
   const allOpen = withDetail.length > 0 && withDetail.every((i) => openIdx.has(i));
 
-  // Inside a trace, every failed call is worth being able to reach — unlike the
-  // session lists, where routine tool errors are noise. A 10,000-row trace has
-  // no other way to find the red rows.
-  const errorIdx = useMemo(
-    () => shown.filter(({ item }) => item.error).map(({ idx }) => idx),
+  // Every turn you typed, in order. A long session is mostly tool traffic, so
+  // stepping prompt to prompt is the only practical way to move through it.
+  const promptRows = useMemo(
+    () =>
+      shown
+        .filter(({ item }) => item.promptN)
+        .map(({ idx, item }) => ({ idx, n: item.promptN as number })),
     [shown]
   );
 
-  const jumpToError = useCallback(
+  // Which prompt you are currently reading: the last one whose turn begins at
+  // or above the middle of the box. The middle rather than the top because that
+  // is where a focused prompt gets scrolled to — measuring at the top would
+  // report the previous prompt for the very row being highlighted.
+  //
+  // Recomputed from live geometry rather than tracked, so expanding a diff or
+  // streaming new rows can't desynchronise it.
+  const syncCurrent = useCallback(() => {
+    const box = boxRef.current;
+    if (!box || promptRows.length === 0) return;
+    const middle = box.getBoundingClientRect().top + box.clientHeight / 2;
+    let cur = promptRows[0]; // above the first prompt you are still in its turn
+    for (const p of promptRows) {
+      const row = box.querySelector(`[data-idx="${p.idx}"]`);
+      if (!row) continue;
+      if (row.getBoundingClientRect().top > middle) break; // rows are in order
+      cur = p;
+    }
+    setCurrentPrompt(cur.n);
+    // Keep the walker anchored to what you are looking at, so "next" from a
+    // scrolled position means the prompt after this one — not the one after
+    // wherever the arrows last left off.
+    promptCursor.current = cur.idx;
+  }, [promptRows]);
+
+  // Geometry moves under the counter for reasons other than scrolling: rows
+  // stream in, the filter narrows the list, a diff expands. Recompute after any
+  // of those, and drop a pending frame on unmount.
+  useEffect(() => {
+    const id = requestAnimationFrame(syncCurrent);
+    return () => cancelAnimationFrame(id);
+  }, [syncCurrent, items, openIdx]);
+
+  useEffect(
+    () => () => {
+      if (scrollTick.current !== null) cancelAnimationFrame(scrollTick.current);
+    },
+    []
+  );
+
+
+  const jumpToPrompt = useCallback(
     (dir: 1 | -1) => {
-      if (errorIdx.length === 0) return;
-      const from = errorCursor.current;
-      // Wraps in both directions, so repeated presses cycle the whole trace.
+      if (promptRows.length === 0) return;
+      const from = promptCursor.current;
+      // Wraps at both ends, so holding one arrow cycles the whole session.
       const next =
         dir === 1
-          ? (errorIdx.find((i) => i > from) ?? errorIdx[0])
-          : ([...errorIdx].reverse().find((i) => i < from) ??
-            errorIdx[errorIdx.length - 1]);
-      errorCursor.current = next;
-      setFocusIdx(next);
-      followRef.current = false;
+          ? (promptRows.find((p) => p.idx > from) ?? promptRows[0])
+          : ([...promptRows].reverse().find((p) => p.idx < from) ??
+            promptRows[promptRows.length - 1]);
+      promptCursor.current = next.idx;
+      setFocusIdx(next.idx);
+      setCurrentPrompt(next.n);
+      followRef.current = false; // stop tailing, you're reading now
       const box = boxRef.current;
-      const row = box?.querySelector(`[data-idx="${next}"]`);
+      const row = box?.querySelector(`[data-idx="${next.idx}"]`);
       if (!box || !row) return;
+      // Centred, matching both how a focused prompt is scrolled to and how
+      // `syncCurrent` measures. Centring the target also guarantees every later
+      // prompt sits below the middle, so the counter lands on exactly this one.
       const delta =
         row.getBoundingClientRect().top - box.getBoundingClientRect().top;
       box.scrollTop += delta - (box.clientHeight - row.clientHeight) / 2;
     },
-    [errorIdx]
+    [promptRows]
   );
 
   return (
@@ -476,26 +549,30 @@ export default function SessionTrace({
             {shown.length} match{shown.length === 1 ? "" : "es"}
           </span>
         )}
-        {errorIdx.length > 0 && (
-          <span className="error-nav">
+        {promptRows.length > 0 && (
+          <span className="prompt-nav">
             <button
               type="button"
               className="nav-btn sm"
-              onClick={() => jumpToError(-1)}
-              title="Previous failed call"
-              aria-label="Previous failed call"
+              onClick={() => jumpToPrompt(-1)}
+              title="Previous prompt"
+              aria-label="Previous prompt"
             >
               ↑
             </button>
-            <span className="error-count" title="Tool calls that returned an error">
-              {errorIdx.length} failed
+            <span
+              className="prompt-count"
+              title="Prompt you are currently reading, of the session's total"
+            >
+              {currentPrompt ?? promptRows[0].n}/{promptRows.length} prompt
+              {promptRows.length === 1 ? "" : "s"}
             </span>
             <button
               type="button"
               className="nav-btn sm"
-              onClick={() => jumpToError(1)}
-              title="Next failed call"
-              aria-label="Next failed call"
+              onClick={() => jumpToPrompt(1)}
+              title="Next prompt"
+              aria-label="Next prompt"
             >
               ↓
             </button>

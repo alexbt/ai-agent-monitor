@@ -782,6 +782,11 @@ export default function OfficeView({ provider }: { provider: Provider }) {
                   ? selectedChoice.prompt.text
                   : null
               }
+              focusPromptN={
+                selectedChoice?.session.id === selected.id
+                  ? selectedChoice.prompt.n
+                  : null
+              }
             />
           </div>
         </>

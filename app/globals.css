@@ -17,6 +17,8 @@
   /* "waiting on you" — distinct from the green of work in progress and from
      the accent, which already means "this is the thing you clicked". */
   --amber: #d4a72c;
+  /* the turns you typed, in the trace and in the counter that walks them */
+  --user: #58a6ff;
 }
 
 body {
@@ -430,20 +432,6 @@ h2 {
 .badge.friction {
   color: #d29922;
   border-color: #4a3f22;
-}
-
-/* Error walker in the trace toolbar. */
-.error-nav {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.error-count {
-  font-size: 11px;
-  color: #f85149;
-  white-space: nowrap;
 }
 
 /* --- prompts mode --- */
@@ -922,11 +910,11 @@ h2.with-actions .seg {
 }
 
 .trace-item.user {
-  border-left-color: #58a6ff;
+  border-left-color: var(--user);
 }
 
 .trace-item.user .trace-role {
-  color: #58a6ff;
+  color: var(--user);
 }
 
 .trace-item.assistant {
@@ -959,6 +947,26 @@ h2.with-actions .seg {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Prompt walker in the trace toolbar. */
+.prompt-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.prompt-count {
+  font-size: 11px;
+  /* same blue as the `user · prompt N` rows it steps between */
+  color: var(--user);
+  white-space: nowrap;
+}
+
+/* The turns you typed, so a jump lands on something recognisable. */
+.trace-item.user .trace-role {
+  font-weight: 600;
 }
 
 /* --- expandable tool payloads --- */

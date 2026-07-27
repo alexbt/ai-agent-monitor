@@ -236,6 +236,20 @@ const codexLine: LineParser = (entry) => {
 
 // Codex rollouts record no equivalent of any of the three, so nothing to read.
 
+// Is this transcript line a prompt you actually typed? Exported so the trace
+// stream can number prompts using the very same test the prompt list uses —
+// the two disagreeing about what counts would be worse than either being wrong,
+// because the trace's "prompt 3 of 9" has to match the row you clicked.
+export function typedPromptText(
+  entry: any,
+  provider: "claude" | "codex"
+): string | null {
+  const hit = (provider === "codex" ? codexLine : claudeLine)(entry);
+  if (!hit) return null;
+  if (hit.trusted ? !hit.text.trim() : !isRealPrompt(hit.text)) return null;
+  return hit.text;
+}
+
 export function claudePrompts(project: string, sessionId: string): Prompt[] {
   return readIncremental(
     path.join(PROJECTS_DIR, project, `${sessionId}.jsonl`),

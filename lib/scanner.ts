@@ -66,6 +66,10 @@ export interface TraceItem {
   name?: string;
   text: string; // collapsed one-line summary
   ts: number;
+  // 1-based position of this prompt within the session, set only on the user
+  // turns you actually typed. Injected content (task notifications, hook
+  // output) arrives through the same channel and is deliberately unnumbered.
+  promptN?: number;
   // Expandable structured payload, when the entry carried one.
   detail?: ToolDetail;
   // True when the tool reported a failure (`is_error` on the result block).
