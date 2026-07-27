@@ -196,6 +196,10 @@ export function scanCodex(): Snapshot {
       startedAt: st.birthtimeMs || mtime,
       lastActivity: mtime,
       active: now - mtime < ACTIVE_WINDOW_MS,
+      // Codex publishes no process registry, so there is no truthful busy/idle
+      // to report — null, not a guess. `active` is all this provider has.
+      state: null,
+      pid: null,
       agents: [], // Codex sessions are single-agent: no subagent transcripts
       comms: [],
     };

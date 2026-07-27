@@ -78,7 +78,25 @@ Without make: `npm install`, then `npm run dev`.
 
 ## Notes & limitations
 
-- Activity is inferred from file writes: a session idle at the prompt (waiting for user input) shows as **inactive** after ~60 seconds even though its process is alive.
+- **Session state** — Claude Code writes a file per running CLI process to `~/.claude/sessions/<pid>.json` naming the session it drives and whether it is `busy` or `idle`. That plus the transcript gives four honest states:
+
+  | state | means | how it's derived |
+  |---|---|---|
+  | **working** | running and generating | registry says `busy` |
+  | **needs you** | stopped and *blocked* — a permission prompt or a question | registry says `idle` **and** the newest assistant turn left a tool call unanswered |
+  | **idle** | finished its turn (`✻ Crunched for …`) and back at the prompt | registry says `idle` and nothing is outstanding |
+  | **ended** | no live process — the CLI exited or was killed | no registry entry, or its pid is dead |
+
+  The registry's `busy`/`idle` alone conflates the middle two, which is the difference between "it wants something from you" and "it's done". Only the first is worth interrupting you for, so only it counts toward the "Needs you" filter and the notifications. The Session Log filters on these, the header counts them, and the Office View colours its dots by them.
+
+  Liveness comes from the pid (`kill(pid, 0)`, treating `EPERM` as alive), never from a timestamp: `statusUpdatedAt` records when the status last *changed* and ages steadily while a session sits busy, so freshness would be a bad proxy. A killed CLI can leave its file behind, which is why a dead pid reports `ended` regardless of what the file says.
+
+  The bell toggle opts into a desktop notification when a session transitions to *needs you*, plus a count in the tab title so a background tab still reports. Permission is only ever requested on that click. This stays read-only — nothing is written to `~/.claude`.
+
+  In Prompts mode the state belongs to the session's **newest** prompt only — the earlier ones finished long ago and don't inherit it. That holds in both views: the Session Log's rows and its state filter, and the Office View's picker, panel header and scene. Selecting an older turn shows the state it ended in, not what the session is doing now.
+
+  Codex publishes no such registry, so its sessions report an unknown state and fall back to the file-mtime heuristic below.
+- Where no state is available, activity is inferred from file writes: a session idle at the prompt shows as **inactive** after ~60 seconds even though its process is alive. This is what the registry replaces for Claude.
 - **Session titles** come from the `ai-title` record Claude Code writes into its own transcript (`{"type":"ai-title","aiTitle":…}`) — a short LLM-written summary of what the session is about, which beats labelling a multi-hour session by whatever was typed first. The opening prompt is still shown, on a second line beneath the title.
 
   It's read from both ends of the file, no extra I/O: the tail pass that already tracks the model takes the newest one, and the header read covers long sessions whose last 64 KB happens to contain none (the record repeats only every few turns — as little as once per 64 KB on the transcripts here). Whichever is found is sticky, so the title can't flicker back to unknown. Sessions ending before Claude Code generates a title, and all Codex sessions (no equivalent record), keep falling back to the first prompt.

@@ -4,6 +4,10 @@ import os from "os";
 
 const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
+// Claude Code keeps a file per running CLI process here, naming the session it
+// is driving and whether that session is busy or waiting on you.
+const SESSIONS_DIR = path.join(os.homedir(), ".claude", "sessions");
+
 // A file written within this window is considered "active" (being worked on right now).
 const ACTIVE_WINDOW_MS = 60_000;
 
@@ -89,6 +93,22 @@ export interface AgentInfo {
   flowLabel: string | null;
 }
 
+// What a session is actually doing, as opposed to whether its file was touched
+// recently. Only known for Claude sessions with a live process behind them.
+//
+//   working — the CLI is running and generating
+//   waiting — the CLI is running and stopped with a tool call unanswered: it is
+//             blocked on a permission prompt or a question, and cannot proceed
+//   idle    — the CLI is running and stopped with nothing outstanding: it
+//             finished its turn ("✻ Crunched for …") and is back at the prompt
+//   ended   — no live process; the CLI exited, or was killed
+//
+// The registry only reports busy/idle, which conflates the middle two — the
+// difference comes from whether the newest assistant turn left a tool call
+// unanswered. Null means no authoritative signal at all (Codex, or a Claude
+// Code too old to write the registry), in which case `active` is all there is.
+export type SessionState = "working" | "waiting" | "idle" | "ended";
+
 export interface SessionInfo {
   id: string;
   project: string;
@@ -103,7 +123,12 @@ export interface SessionInfo {
   model: string | null; // model of the most recent assistant turn
   startedAt: number;
   lastActivity: number;
+  // Derived from file mtime: "something wrote to this transcript recently".
+  // Kept because it is all Codex has, but `state` is the truthful signal.
   active: boolean;
+  state: SessionState | null;
+  // The CLI process driving this session, when one is running.
+  pid: number | null;
   agents: AgentInfo[];
   comms: CommEvent[];
 }
@@ -132,6 +157,58 @@ const headerCache = new Map<
     teamName: string | null;
   }
 >();
+
+// Is that process still there? `signal 0` performs the permission checks
+// without delivering anything, so it answers "does this pid exist". EPERM means
+// it exists but belongs to someone else, which still counts as alive.
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+// Live session state, keyed by session id, from `~/.claude/sessions/<pid>.json`.
+//
+// This is the only authoritative answer to "is it working, or waiting on me".
+// Note what it is not: `statusUpdatedAt` records when the status last changed,
+// not a heartbeat — it ages while a session sits busy — so liveness comes from
+// the pid, never from that timestamp being fresh.
+// `busy` maps straight to working; `idle` is refined per session by the caller,
+// which knows whether that session's newest turn is still holding a tool call
+// open. Here it means only "the process is alive and not generating".
+function readSessionStates(): Map<string, { running: boolean; busy: boolean; pid: number }> {
+  const states = new Map<string, { running: boolean; busy: boolean; pid: number }>();
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(SESSIONS_DIR);
+  } catch {
+    return states; // no registry: every session reports an unknown state
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".json")) continue;
+    let reg: any;
+    try {
+      reg = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, name), "utf8"));
+    } catch {
+      continue;
+    }
+    const id = reg?.sessionId;
+    const pid = reg?.pid;
+    if (typeof id !== "string" || typeof pid !== "number") continue;
+    // A killed CLI can leave its file behind, so trust the process, not the
+    // file's existence. (A recycled pid could in principle read as alive; the
+    // window is small and the cost is one row briefly mislabelled.)
+    if (!pidAlive(pid)) {
+      states.set(id, { running: false, busy: false, pid });
+      continue;
+    }
+    states.set(id, { running: true, busy: reg.status === "busy", pid });
+  }
+  return states;
+}
 
 function readSessionHeader(filePath: string) {
   const cached = headerCache.get(filePath);
@@ -224,18 +301,23 @@ function readTailLines(filePath: string, bytes: number): string[] {
 // once, an active one only re-read after it grows.
 const tailCache = new Map<
   string,
-  { mtime: number; model: string | null; title: string | null }
+  { mtime: number; model: string | null; title: string | null; blocked: boolean }
 >();
 
 function readSessionTail(
   filePath: string,
   mtime: number
-): { model: string | null; title: string | null } {
+): { model: string | null; title: string | null; blocked: boolean } {
   const cached = tailCache.get(filePath);
   if (cached && cached.mtime === mtime) return cached;
 
   let model: string | null = null;
   let title: string | null = null;
+  // Tool calls made by the most recent assistant turn, minus the ones already
+  // answered. A stopped CLI with something still outstanding here is blocked on
+  // you — a permission prompt, or a question it asked. A stopped CLI with
+  // nothing outstanding simply finished its turn.
+  let openTools = new Set<string>();
   for (const line of readTailLines(filePath, 64 * 1024)) {
     let entry: any;
     try {
@@ -249,10 +331,22 @@ function readSessionTail(
       }
       continue;
     }
+    if (entry?.type === "user") {
+      for (const c of entry.message?.content ?? []) {
+        if (c?.type === "tool_result" && c.tool_use_id) openTools.delete(c.tool_use_id);
+      }
+      continue;
+    }
     if (entry?.type !== "assistant") continue;
     const m = entry.message?.model;
     // "<synthetic>" marks locally-generated messages (API errors, notices)
     if (typeof m === "string" && m && m !== "<synthetic>") model = m;
+    // Only the newest turn's calls matter, so each assistant entry resets the
+    // set rather than accumulating across the whole window.
+    const calls = (entry.message?.content ?? []).filter(
+      (c: any) => c?.type === "tool_use" && typeof c.id === "string"
+    );
+    if (calls.length > 0) openTools = new Set(calls.map((c: any) => c.id as string));
   }
   // A tail made up entirely of tool results holds no assistant entry — in that
   // case keep the last model we saw rather than flickering back to unknown.
@@ -260,7 +354,7 @@ function readSessionTail(
   if (model === null && cached) model = cached.model;
   if (title === null && cached) title = cached.title;
 
-  const result = { mtime, model, title };
+  const result = { mtime, model, title, blocked: openTools.size > 0 };
   tailCache.set(filePath, result);
   return result;
 }
@@ -443,6 +537,8 @@ export function scanCached(maxAgeMs = 1000): Snapshot {
 export function scan(): Snapshot {
   const now = Date.now();
   const projects: ProjectInfo[] = [];
+  // One small file per running CLI, so this is a couple of reads per scan.
+  const liveStates = readSessionStates();
 
   let projectDirs: fs.Dirent[] = [];
   try {
@@ -483,6 +579,7 @@ export function scan(): Snapshot {
       const agents = scanAgents(path.join(projectPath, sessionId), now);
       const lastActivity = Math.max(mtime, ...agents.map((a) => a.lastActivity));
       const tail = readSessionTail(filePath, mtime);
+      const live = liveStates.get(sessionId);
 
       sessions.push({
         id: sessionId,
@@ -499,6 +596,17 @@ export function scan(): Snapshot {
         startedAt: birth,
         lastActivity,
         active: now - lastActivity < ACTIVE_WINDOW_MS,
+        // A session with no registry entry has no live process behind it —
+        // "ended" rather than unknown. Unknown is reserved for providers that
+        // publish no registry at all (see `state` on SessionInfo).
+        state: !live?.running
+          ? "ended"
+          : live.busy
+            ? "working"
+            : tail.blocked
+              ? "waiting"
+              : "idle",
+        pid: live?.pid ?? null,
         agents,
         // Only recently-written transcripts can contain in-window comm events.
         comms:

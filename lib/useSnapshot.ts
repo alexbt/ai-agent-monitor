@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { SessionInfo, Snapshot } from "@/lib/scanner";
+import type { SessionInfo, SessionState, Snapshot } from "@/lib/scanner";
 
 export type Provider = "claude" | "codex";
 
@@ -48,6 +48,40 @@ export function timeAgo(ts: number, now: number): string {
 export function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
+
+// Is the CLI actually doing something right now? Providers that publish no
+// process registry (Codex) have only the mtime heuristic to fall back on.
+export function isWorking(s: SessionInfo): boolean {
+  return s.state ? s.state === "working" : s.active;
+}
+
+// Blocked: it stopped with a tool call unanswered and cannot continue without
+// you. Deliberately narrower than "not generating" — a session that finished
+// its turn is `idle`, not something demanding attention. Never true without an
+// authoritative signal; guessing this one would be worse than staying quiet.
+export function needsYou(s: SessionInfo): boolean {
+  return s.state === "waiting";
+}
+
+// Running but not generating: either blocked on you, or finished and sitting at
+// the prompt. Both mean "you could type into this terminal right now".
+export function isLive(s: SessionInfo): boolean {
+  return s.state === "working" || s.state === "waiting" || s.state === "idle";
+}
+
+// Class suffix for the row, dot and badge. Kept in one place so the Session Log
+// and Office View can't drift apart on what a colour means.
+export function stateClass(s: SessionInfo): SessionState | "unknown" {
+  if (s.state) return s.state;
+  return s.active ? "working" : "unknown";
+}
+
+export const STATE_LABEL: Record<SessionState, string> = {
+  working: "working",
+  waiting: "needs you",
+  idle: "idle",
+  ended: "ended",
+};
 
 // What to call a session in a list. Claude Code's own title when it has written
 // one — it stays accurate for a long session in a way the opening prompt does

@@ -14,6 +14,9 @@
   --green: #3fb950;
   --gray: #6e7681;
   --accent: #d97757;
+  /* "waiting on you" — distinct from the green of work in progress and from
+     the accent, which already means "this is the thing you clicked". */
+  --amber: #d4a72c;
 }
 
 body {
@@ -267,14 +270,80 @@ h2 {
   margin-bottom: 10px;
 }
 
-.session.active {
+/* Row state. `working` pulses because it is changing under you; `waiting` is
+   steady amber because it is stopped and wants something — a blinking "come
+   here" is harder to ignore than it deserves to be. */
+.session.state-working {
   border-color: var(--green);
 }
 
-.session.active > .session-header .dot {
+.session.state-working > .session-header .dot {
   background: var(--green);
   box-shadow: 0 0 6px var(--green);
   animation: pulse 1.6s ease-in-out infinite;
+}
+
+.session.state-waiting {
+  border-color: var(--amber);
+}
+
+.session.state-waiting > .session-header .dot {
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber);
+}
+
+.badge.state.waiting {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+/* Finished its turn and still open: worth distinguishing from a dead process
+   (you can type into it) but not worth shouting about. */
+.session.state-idle > .session-header .dot {
+  background: var(--text-dim);
+  box-shadow: 0 0 5px rgba(139, 148, 158, 0.5);
+}
+
+.badge.state.idle {
+  color: var(--text-dim);
+}
+
+.dot.state-idle {
+  background: var(--text-dim);
+  box-shadow: 0 0 5px rgba(139, 148, 158, 0.5);
+}
+
+.time.state-idle {
+  color: var(--text-dim);
+}
+
+.badge.state.working {
+  color: var(--green);
+  border-color: #2f6b3a;
+}
+
+/* A count on the filter itself, so the tab does not have to be focused for the
+   number to be visible. */
+.seg-btn.alert {
+  color: var(--amber);
+}
+
+.icon-toggle {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 9px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-toggle:hover {
+  border-color: var(--accent);
+}
+
+.icon-toggle.on {
+  border-color: var(--amber);
 }
 
 @keyframes pulse {
@@ -1026,10 +1095,25 @@ h2.with-actions .seg {
 }
 
 /* the same green "active" dot used on the Session Log list */
-.dot.on {
+.dot.on,
+.dot.state-working {
   background: var(--green);
   box-shadow: 0 0 5px var(--green);
   animation: pulse 1.6s ease-in-out infinite;
+}
+
+.dot.state-waiting {
+  background: var(--amber);
+  box-shadow: 0 0 5px var(--amber);
+}
+
+/* The office title's status line, coloured to match its dot. */
+.time.state-waiting {
+  color: var(--amber);
+}
+
+.time.state-working {
+  color: var(--green);
 }
 
 /* Uncapped on purpose: the picker holds nothing else, so it spans the column's

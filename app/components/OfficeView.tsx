@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import type { SessionInfo, CommEvent } from "@/lib/scanner";
+import type { SessionInfo, SessionState, CommEvent } from "@/lib/scanner";
 import {
   useSnapshot,
   timeAgo,
@@ -10,6 +10,7 @@ import {
   sessionLabel,
   fmtDuration,
   modelLabel,
+  stateClass,
   type Provider,
 } from "@/lib/useSnapshot";
 import { usePrompts, useViewMode, type Prompt } from "@/lib/usePrompts";
@@ -47,6 +48,22 @@ function runningTime(
     : `ran ${fmtDuration(Math.max(0, lastActivity - startedAt))}`;
 }
 
+// One line describing where a session stands, preferring the truthful state
+// over "the file changed recently".
+// `state` overrides what the session itself reports: in prompts mode a row
+// only owns the session's live state if it is that session's newest prompt.
+function stateSub(
+  s: SessionInfo,
+  now: number,
+  state: SessionState | "unknown" = stateClass(s)
+): string {
+  if (state === "working") return "working now";
+  if (state === "waiting") return `needs you · blocked ${timeAgo(s.lastActivity, now)}`;
+  if (state === "idle") return `idle at the prompt · ${timeAgo(s.lastActivity, now)}`;
+  if (state === "ended") return `ended · ${timeAgo(s.lastActivity, now)}`;
+  return s.active ? "active now" : `active ${timeAgo(s.lastActivity, now)}`;
+}
+
 // In prompts mode the picker lists every prompt of every session rather than
 // one entry per session; choosing one selects its session and points the
 // trace at that turn.
@@ -54,6 +71,12 @@ interface PromptChoice {
   session: SessionInfo & { projectName: string };
   prompt: Prompt;
   total: number;
+}
+
+// "Working" and "needs you" describe what a session is doing right now, which
+// is only ever its newest prompt — the ones before it already finished.
+function choiceState(c: PromptChoice): SessionState | "unknown" {
+  return c.prompt.n === c.total ? stateClass(c.session) : "ended";
 }
 
 function PromptDropdown({
@@ -87,7 +110,7 @@ function PromptDropdown({
   }, [open]);
 
   const sub = (c: PromptChoice) =>
-    `${c.session.projectName.split("/").pop()} · ${shortId(c.session.id)} · prompt ${c.prompt.n}/${c.total} · ${timeAgo(c.prompt.ts || c.session.lastActivity, now)}`;
+    `${c.session.projectName.split("/").pop()} · ${shortId(c.session.id)} · prompt ${c.prompt.n}/${c.total} · ${stateSub(c.session, now, choiceState(c))}`;
 
   return (
     <div className="dropdown" ref={ref}>
@@ -97,7 +120,7 @@ function PromptDropdown({
         aria-haspopup="listbox"
         aria-expanded={open}
       >
-        <span className={`dot ${selected?.session.active ? "on" : ""}`} />
+        <span className={`dot state-${selected ? choiceState(selected) : "unknown"}`} />
         <span className="dropdown-text">
           <span className="dropdown-label" title={selected?.prompt.text}>
             {selected ? selected.prompt.text : "No prompts found"}
@@ -126,7 +149,7 @@ function PromptDropdown({
                   }}
                   title={c.prompt.text}
                 >
-                  <span className={`dot ${c.session.active ? "on" : ""}`} />
+                  <span className={`dot state-${choiceState(c)}`} />
                   <span className="dropdown-text">
                     <span className="dropdown-label">{c.prompt.text}</span>
                     <span className="dropdown-sub">{sub(c)}</span>
@@ -179,14 +202,11 @@ function SessionDropdown({
         aria-haspopup="listbox"
         aria-expanded={open}
       >
-        <span className={`dot ${selected.active ? "on" : ""}`} />
+        <span className={`dot state-${stateClass(selected)}`} />
         <span className="dropdown-text">
           <span className="dropdown-label">{sessionLabel(selected)}</span>
           <span className="dropdown-sub">
-            {selected.projectName.split("/").pop()} ·{" "}
-            {selected.active
-              ? "active now"
-              : `active ${timeAgo(selected.lastActivity, now)}`}
+            {selected.projectName.split("/").pop()} · {stateSub(selected, now)}
           </span>
         </span>
         <span className="dropdown-caret">▾</span>
@@ -207,14 +227,11 @@ function SessionDropdown({
                   [s.title, s.firstPrompt].filter(Boolean).join("\n") || s.id
                 }
               >
-                <span className={`dot ${s.active ? "on" : ""}`} />
+                <span className={`dot state-${stateClass(s)}`} />
                 <span className="dropdown-text">
                   <span className="dropdown-label">{sessionLabel(s)}</span>
                   <span className="dropdown-sub">
-                    {s.projectName.split("/").pop()} ·{" "}
-                    {s.active
-                      ? "active now"
-                      : `active ${timeAgo(s.lastActivity, now)}`}
+                    {s.projectName.split("/").pop()} · {stateSub(s, now)}
                   </span>
                 </span>
               </button>
@@ -568,6 +585,17 @@ export default function OfficeView({ provider }: { provider: Provider }) {
         : undefined;
   const spend = totals && totals.cost > 0 ? totals : null;
 
+  // In prompts mode the panel describes one prompt, and only the session's
+  // newest prompt owns its live state — picking an older turn shows the state
+  // that turn ended in, not what the session is doing now.
+  const shownState: SessionState | "unknown" = !selected
+    ? "unknown"
+    : mode === "prompts"
+      ? selectedChoice
+        ? choiceState(selectedChoice)
+        : "unknown"
+      : stateClass(selected);
+
   // Carried on every cross-view link so the other view lands on the same turn.
   const promptParam =
     selected && selectedChoice?.session.id === selected.id
@@ -722,10 +750,8 @@ export default function OfficeView({ provider }: { provider: Provider }) {
                   📊 Status
                 </Link>
               </span>
-              <span className="time">
-                {selected.active
-                  ? "working now"
-                  : `idle · ${timeAgo(selected.lastActivity, now)}`}
+              <span className={`time state-${shownState}`}>
+                {stateSub(selected, now, shownState)}
               </span>
             </div>
             <OfficeScene
@@ -739,7 +765,7 @@ export default function OfficeView({ provider }: { provider: Provider }) {
                 selected.lastActivity,
                 now
               )}
-              mainActive={selected.active}
+              mainActive={shownState === "working"}
               mainTitle={
                 [selected.title, selected.firstPrompt]
                   .filter(Boolean)

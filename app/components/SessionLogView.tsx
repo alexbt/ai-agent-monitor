@@ -9,8 +9,13 @@ import {
   timeAgo,
   shortId,
   modelLabel,
+  isWorking,
+  needsYou,
+  stateClass,
+  STATE_LABEL,
   type Provider,
 } from "@/lib/useSnapshot";
+import { useAlerts } from "@/lib/useAlerts";
 import { useCosts, fmtCost, type Costs } from "@/lib/useCosts";
 import SessionTrace from "./SessionTrace";
 
@@ -37,6 +42,18 @@ function CostBadge({
       {fmtCost(totals.cost)}
     </span>
   );
+}
+
+// Spelling out what each state means, since "idle" and "needs you" are a
+// distinction the CLI's own busy/idle flag does not make.
+function stateTitle(s: SessionInfo): string {
+  const pid = s.pid ? ` (pid ${s.pid})` : "";
+  if (s.state === "working") return `The CLI is running and generating${pid}`;
+  if (s.state === "waiting")
+    return `The CLI stopped with a tool call unanswered — it is blocked on a permission prompt or a question${pid}`;
+  if (s.state === "idle")
+    return `The CLI finished its turn and is back at the prompt${pid}`;
+  return "No live process for this session";
 }
 
 function AgentRow({ agent, now }: { agent: AgentInfo; now: number }) {
@@ -79,10 +96,15 @@ function PromptCard({
   const officeHref = provider === "codex" ? "/codex/visual" : "/visual";
   const statusHref = provider === "codex" ? "/codex/status" : "/status";
   const target = `session=${encodeURIComponent(session.id)}&prompt=${prompt.n}`;
+  // "Working" and "needs you" describe what the session is doing *now*, which
+  // is only ever its newest prompt. Older prompts in the same session finished
+  // long ago and shouldn't inherit its state.
+  const isLatest = prompt.n === total;
+  const rowState = isLatest ? stateClass(session) : "ended";
   return (
     <div
       id={`prompt-${session.id}-${prompt.n}`}
-      className={`session prompt-row ${session.active ? "active" : ""}`}
+      className={`session prompt-row state-${rowState}`}
     >
       <div className="session-header clickable" onClick={onToggle}>
         <span className="dot" />
@@ -104,6 +126,14 @@ function PromptCard({
           totals={prompt.id ? costs.byPrompt.get(prompt.id) : undefined}
           what="prompt"
         />
+        {isLatest && session.state && session.state !== "ended" && (
+          <span
+            className={`badge state ${session.state}`}
+            title={stateTitle(session)}
+          >
+            {STATE_LABEL[session.state]}
+          </span>
+        )}
         <span className="time">
           {prompt.ts ? timeAgo(prompt.ts, now) : timeAgo(session.lastActivity, now)}
         </span>
@@ -156,7 +186,7 @@ function SessionCard({
   return (
     <div
       id={`session-${session.id}`}
-      className={`session ${session.active ? "active" : ""}`}
+      className={`session state-${stateClass(session)}`}
     >
       <div className="session-header clickable" onClick={onToggle}>
         <span className="dot" />
@@ -180,6 +210,16 @@ function SessionCard({
         )}
         {session.gitBranch && <span className="badge">{session.gitBranch}</span>}
         <CostBadge totals={costs.bySession.get(session.id)} what="session" />
+        {/* Only stated when the process registry actually knows; "ended" is
+            the resting state of most rows and would just be noise. */}
+        {session.state && session.state !== "ended" && (
+          <span
+            className={`badge state ${session.state}`}
+            title={stateTitle(session)}
+          >
+            {STATE_LABEL[session.state]}
+          </span>
+        )}
         <span className="time">{timeAgo(session.lastActivity, now)}</span>
         {session.agents.length > 0 && (
           <span className="agent-count">
@@ -242,12 +282,13 @@ function matchesDescription(
 export default function SessionLogView({ provider }: { provider: Provider }) {
   const { snapshot, connected, now } = useSnapshot(10_000, provider);
   const costs = useCosts(provider);
+  const alerts = useAlerts(snapshot);
   const [mode, setMode] = useViewMode();
   const { prompts, loaded: promptsLoaded } = usePrompts(
     provider,
     mode === "prompts"
   );
-  const [filter, setFilter] = useState<"all" | "active">("all");
+  const [filter, setFilter] = useState<"all" | "needs" | "working">("all");
   // In prompts mode this holds "<sessionId>#<n>" so each prompt row expands
   // independently; in sessions mode it is just the session id.
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -344,7 +385,12 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
     };
   }, [q, searchContent, provider]);
 
-  const passesFilter = (s: SessionInfo) => filter === "all" || s.active;
+  const passesFilter = (s: SessionInfo) =>
+    filter === "all"
+      ? true
+      : filter === "needs"
+        ? needsYou(s)
+        : isWorking(s);
 
   const projects = (snapshot?.projects ?? [])
     .map((p) => ({
@@ -368,7 +414,11 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
         .filter(passesFilter)
         .flatMap((s) => {
           const list = prompts[s.id] ?? [];
-          return list
+          // A session's live state belongs to its newest prompt — the earlier
+          // ones already finished — so filtering on that state shows just that
+          // row rather than dragging the session's whole history along.
+          const scoped = filter === "all" ? list : list.slice(-1);
+          return scoped
             .filter(
               (pr) =>
                 !q ||
@@ -387,10 +437,9 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
 
   const totalPrompts = promptProjects.reduce((n, p) => n + p.rows.length, 0);
 
-  const totalActive = (snapshot?.projects ?? []).reduce(
-    (n, p) => n + p.sessions.filter((s) => s.active).length,
-    0
-  );
+  const allSessions = (snapshot?.projects ?? []).flatMap((p) => p.sessions);
+  const totalWorking = allSessions.filter(isWorking).length;
+  const totalNeedsYou = allSessions.filter(needsYou).length;
 
   // Seven-day spend for a project heading, or "" when nothing priced landed in
   // that window (an archive of old sessions shouldn't claim it cost $0.00).
@@ -427,23 +476,55 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
             ))}
           </div>
           <div className="seg" role="group" aria-label="Filter sessions">
-            {(["all", "active"] as const).map((f) => (
+            {(["all", "needs", "working"] as const).map((f) => (
               <button
                 key={f}
-                className={`seg-btn ${filter === f ? "on" : ""}`}
+                className={`seg-btn ${filter === f ? "on" : ""} ${
+                  f === "needs" && totalNeedsYou > 0 ? "alert" : ""
+                }`}
                 aria-pressed={filter === f}
                 onClick={() => setFilter(f)}
+                title={
+                  f === "needs"
+                    ? "Sessions whose CLI has finished its turn and is waiting for you"
+                    : f === "working"
+                      ? "Sessions whose CLI is running and busy"
+                      : "Every session"
+                }
               >
-                {f === "all" ? "All" : "Active"}
+                {f === "all"
+                  ? "All"
+                  : f === "working"
+                    ? "Working"
+                    : `Needs you${totalNeedsYou > 0 ? ` ${totalNeedsYou}` : ""}`}
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            className={`icon-toggle ${alerts.enabled ? "on" : ""}`}
+            onClick={alerts.toggle}
+            aria-pressed={alerts.enabled}
+            title={
+              alerts.permission === "unsupported"
+                ? "This browser has no notification support — the tab title still counts finished sessions"
+                : alerts.enabled
+                  ? alerts.permission === "granted"
+                    ? "Notifying when a session finishes its turn"
+                    : "Counting finished sessions in the tab title (notifications were blocked)"
+                  : "Tell me when a session finishes its turn"
+            }
+          >
+            {alerts.enabled ? "🔔" : "🔕"}
+          </button>
           <span className={`conn ${connected ? "ok" : "down"}`}>
             <span className="dot" />
             {connected
               ? mode === "prompts"
                 ? `live · ${totalPrompts} prompts`
-                : `live · ${totalActive} active`
+                : `live · ${totalWorking} working${
+                    totalNeedsYou > 0 ? ` · ${totalNeedsYou} needs you` : ""
+                  }`
               : "reconnecting…"}
           </span>
         </div>
@@ -485,9 +566,11 @@ export default function SessionLogView({ provider }: { provider: Provider }) {
           <p className="empty">
             {q
               ? `No ${mode === "prompts" ? "prompts" : "sessions"} match “${query.trim()}”.`
-              : filter === "active"
-                ? "No active sessions right now."
-                : `No ${mode === "prompts" ? "prompts" : "sessions"} found.`}
+              : filter === "needs"
+                ? "Nothing is waiting on you."
+                : filter === "working"
+                  ? "Nothing is running right now."
+                  : `No ${mode === "prompts" ? "prompts" : "sessions"} found.`}
           </p>
         )}
 
