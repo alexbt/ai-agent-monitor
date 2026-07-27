@@ -11,10 +11,6 @@ cd ai-agent-monitor
 make start          # installs, builds, and serves at http://localhost:3000
 ```
 
-`make start` pulls in whatever is missing, so that one command is enough from a
-fresh clone. Dependencies are installed only when `node_modules` is absent or
-`package.json` has changed since, so re-running it doesn't reinstall.
-
 Then open **http://localhost:3000**. Start a Claude Code or Codex session (or spawn agents/teammates) in any terminal and watch it appear within a couple of seconds.
 
 ## Overview
@@ -55,8 +51,8 @@ Runtime dependencies are just Next.js and React (installed via npm):
 |---|---|
 | `make install` | install dependencies (implied by the targets below) |
 | `make dev` | run in development mode with hot reload (port 3000) |
-| `make build` | production build |
-| `make start` | install if needed, build, then serve it in production mode |
+| `make build` | production build (skipped when no source file has changed) |
+| `make start` | install if needed, build if needed, then serve it in production mode |
 | `make stop` | stop a server started by `dev` or `start` (`make stop PORT=3001` for another port) |
 
 Ctrl-C stops `make dev` / `make start` cleanly. It needs help to do so: make's recipe

@@ -42,14 +42,33 @@ node_modules: package.json package-lock.json | install-deps
 # connections first — which never finishes, because a dashboard tab holds SSE
 # streams open indefinitely. So the interrupt is caught and the server killed
 # outright, with `stop` clearing the worker that killing npm would orphan.
+#
+# A literal `make`, not $(MAKE): make runs recipe lines containing $(MAKE) even
+# under `-n`, so `make -n start` would start a real server instead of printing
+# what it would do.
 dev: node_modules
+	@rm -f .next/.build-stamp
 	@npm run dev & pid=$$!; \
-	trap 'kill -9 $$pid 2>/dev/null; $(MAKE) stop >/dev/null 2>&1; exit 130' INT TERM; \
+	trap 'kill -9 $$pid 2>/dev/null; make stop >/dev/null 2>&1; exit 130' INT TERM; \
 	wait $$pid
 
-# production build
-build: node_modules
+# Everything a production build reads. A change to any of them invalidates it;
+# nothing else in the tree does (docs/, the README, the Makefile itself).
+BUILD_INPUTS := $(shell find app lib -type f 2>/dev/null) \
+                middleware.ts next.config.mjs package.json tsconfig.json
+
+# production build — skipped when nothing it reads has changed
+#
+# Keyed on a stamp rather than on .next/BUILD_ID, because `next dev` writes into
+# the same .next directory and leaves it unusable for `next start`. Mtimes alone
+# can't see that: dev's writes don't touch BUILD_ID, so make would call the
+# build current and serve a directory dev has scribbled on. `dev` deletes the
+# stamp instead, which forces the next `make start` to rebuild.
+build: .next/.build-stamp
+
+.next/.build-stamp: $(BUILD_INPUTS) | node_modules
 	npm run build
+	@touch $@
 
 # launch the production build — http://localhost:3000
 #
@@ -64,7 +83,7 @@ build: node_modules
 # serves the code as it is now, not whenever you last remembered to build.
 start: build
 	@npm run start & pid=$$!; \
-	trap 'kill -9 $$pid 2>/dev/null; $(MAKE) stop >/dev/null 2>&1; exit 130' INT TERM; \
+	trap 'kill -9 $$pid 2>/dev/null; make stop >/dev/null 2>&1; exit 130' INT TERM; \
 	wait $$pid
 
 # stop a server started by `make dev` or `make start`
