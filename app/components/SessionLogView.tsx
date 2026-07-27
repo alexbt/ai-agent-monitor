@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { SessionInfo, AgentInfo } from "@/lib/scanner";
 import { usePrompts, useViewMode, type Prompt } from "@/lib/usePrompts";
+import type { Friction } from "@/lib/prompts";
 import {
   useSnapshot,
   timeAgo,
@@ -54,6 +55,32 @@ function stateTitle(s: SessionInfo): string {
   if (s.state === "idle")
     return `The CLI finished its turn and is back at the prompt${pid}`;
   return "No live process for this session";
+}
+
+// Friction is named for what actually happened rather than shown as a generic
+// "error", because two of the three were you and none of them mean the prompt
+// failed. Ordinary tool errors are excluded upstream — see `Friction`.
+function FrictionChip({ friction }: { friction: Friction | null }) {
+  if (!friction) return null;
+  const parts: string[] = [];
+  if (friction.rejected) parts.push(`${friction.rejected} rejected`);
+  if (friction.interrupted) parts.push(`${friction.interrupted} interrupted`);
+  if (friction.timedOut) parts.push(`${friction.timedOut} timed out`);
+  if (parts.length === 0) return null;
+  return (
+    <span
+      className="badge friction"
+      title={[
+        friction.rejected && `You declined ${friction.rejected} tool call(s)`,
+        friction.interrupted && `You stopped it ${friction.interrupted} time(s)`,
+        friction.timedOut && `${friction.timedOut} command(s) were killed for running too long`,
+      ]
+        .filter(Boolean)
+        .join("\n")}
+    >
+      {parts.join(" · ")}
+    </span>
+  );
 }
 
 function AgentRow({ agent, now }: { agent: AgentInfo; now: number }) {
@@ -126,6 +153,7 @@ function PromptCard({
           totals={prompt.id ? costs.byPrompt.get(prompt.id) : undefined}
           what="prompt"
         />
+        <FrictionChip friction={prompt.friction} />
         {isLatest && session.state && session.state !== "ended" && (
           <span
             className={`badge state ${session.state}`}

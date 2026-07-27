@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import type { StatusInfo, TokenTotals } from "@/lib/status";
 import { fmtCost } from "@/lib/useCosts";
-import { usePrompts } from "@/lib/usePrompts";
+import { usePrompts, useViewMode } from "@/lib/usePrompts";
 import {
   useSnapshot,
   fmtDuration,
@@ -166,11 +166,24 @@ export default function StatusView({ provider }: { provider: Provider }) {
   // The same seven-day turns, re-keyed: "which model did I spend on" vs
   // "which project/session is burning money".
   const [breakdown, setBreakdown] = useState<Breakdown>("session");
+  // Until you pick a breakdown here, this page follows the Prompts/Sessions
+  // choice shared by the other two views — arriving from a prompt row and
+  // landing on a session table loses your place.
+  const [viewMode] = useViewMode();
+  const breakdownPinned = useRef(false);
   const [showAll, setShowAll] = useState(false);
   // Usage aggregates carry no session title — the snapshot does, so name the
   // rows from it rather than making the cost pass re-read every header.
   const { snapshot } = useSnapshot(30_000, provider);
-  const { prompts } = usePrompts(provider, breakdown === "prompt");
+  const { prompts, loaded: promptsLoaded } = usePrompts(
+    provider,
+    breakdown === "prompt"
+  );
+
+  useEffect(() => {
+    if (breakdownPinned.current) return;
+    setBreakdown(viewMode === "prompts" ? "prompt" : "session");
+  }, [viewMode]);
   // What ?session=… (and optionally &prompt=…) named on arrival from another
   // view: the row to scroll to and highlight, and the prompt to hand back when
   // linking onward.
@@ -208,38 +221,27 @@ export default function StatusView({ provider }: { provider: Provider }) {
     };
   }, [provider]);
 
-  // Read the deep link once. Sessions are the only breakdown a session id can
-  // address, so switch to it rather than leaving the link looking broken.
+  // Read the deep link once, and let it decide the breakdown — landing on a
+  // table that doesn't contain the row you clicked reads as a broken link.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const id = params.get("session");
     if (!id) return;
     const n = Number(params.get("prompt"));
     setFocus({ session: id, prompt: n > 0 ? n : null });
-    setBreakdown("session");
+    // A prompt ordinal is only ever attached in prompts mode, so it doubles as
+    // the signal for which breakdown the link came from.
+    setBreakdown(n > 0 ? "prompt" : "session");
+    breakdownPinned.current = true;
   }, []);
 
   // Reveal the row if it sits past the top-N cut, then scroll to it exactly
   // once — later manual expands shouldn't yank the viewport.
-  useEffect(() => {
-    if (!focus || !status || focusDone.current) return;
-    const idx = status.bySession.findIndex((s) => s.session === focus.session);
-    // Nothing to scroll to: the session had no priced traffic in the lookback.
-    if (idx === -1) {
-      focusDone.current = true;
-      return;
-    }
-    if (idx >= TOP_ROWS && !showAll) {
-      setShowAll(true);
-      return; // re-runs once the extra rows have rendered
-    }
-    focusDone.current = true;
-    requestAnimationFrame(() => {
-      document
-        .getElementById(`usage-${focus.session}`)
-        ?.scrollIntoView({ behavior: "smooth", block: "center" });
-    });
-  }, [focus, status, showAll]);
+  // Rows are ordered newest-first, so the priciest session has to be picked
+  // out rather than read off the top of the list.
+  const topSession = (status?.bySession ?? []).reduce<
+    StatusInfo["bySession"][number] | null
+  >((best, s) => (best === null || s.cost > best.cost ? s : best), null);
 
   const win = status?.window ?? null;
   const quota = status?.quota ?? null;
@@ -389,13 +391,51 @@ export default function StatusView({ provider }: { provider: Provider }) {
     });
   }, [status, breakdown, logHref, officeHref, now, titles, promptText, focus]);
 
+  // Which row the deep link points at. In the prompt breakdown the URL carries
+  // an ordinal (`&prompt=3`) while rows are keyed by promptId, so it resolves
+  // through the prompts list — which loads asynchronously, hence the wait below.
+  const focusKey = useMemo(() => {
+    if (!focus) return null;
+    if (breakdown !== "prompt") return focus.session;
+    if (!focus.prompt) return null;
+    return (
+      (prompts[focus.session] ?? []).find((p) => p.n === focus.prompt)?.id ?? null
+    );
+  }, [focus, breakdown, prompts]);
+
+  // Reveal the row if it sits past the top-N cut, then scroll to it exactly
+  // once — later manual expands shouldn't yank the viewport.
+  useEffect(() => {
+    if (!focus || !status || focusDone.current) return;
+    // In the prompt breakdown there is nothing to look for until the prompts
+    // have arrived; don't conclude "missing" before then.
+    if (breakdown === "prompt" && !promptsLoaded) return;
+    const idx = focusKey ? rows.findIndex((r) => r.key === focusKey) : -1;
+    // Nothing to scroll to: no priced traffic for it in the lookback.
+    if (idx === -1) {
+      focusDone.current = true;
+      return;
+    }
+    if (idx >= TOP_ROWS && !showAll) {
+      setShowAll(true);
+      return; // re-runs once the extra rows have rendered
+    }
+    focusDone.current = true;
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`usage-${focusKey}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [focus, focusKey, status, showAll, rows, breakdown, promptsLoaded]);
+
   const visible = showAll ? rows : rows.slice(0, TOP_ROWS);
-  // A session linked from another view but absent here spent nothing priced in
-  // the lookback — say so rather than showing an unhighlighted table.
+  // Linked from another view but absent here: it spent nothing priced in the
+  // lookback. Say so rather than showing an unhighlighted table.
   const focusMissing =
     focus !== null &&
     status !== null &&
-    !status.bySession.some((s) => s.session === focus.session);
+    (breakdown !== "prompt" || promptsLoaded) &&
+    !rows.some((r) => r.key === focusKey);
 
   return (
     <main>
@@ -561,21 +601,21 @@ export default function StatusView({ provider }: { provider: Provider }) {
                 {win ? ` · ${fmtCost(win.totals.cost)} this window` : ""}
               </div>
               {/* The one number the breakdown below exists to surface. */}
-              {status.bySession[0] && status.bySession[0].cost > 0 && (
+              {topSession && topSession.cost > 0 && (
                 <div className="tile-sub">
                   top session{" "}
                   <Link
                     className="mono session-link"
-                    href={`${logHref}?session=${encodeURIComponent(status.bySession[0].session)}`}
+                    href={`${logHref}?session=${encodeURIComponent(topSession.session)}`}
                     title={
-                      [titles.get(status.bySession[0].session), status.bySession[0].session]
+                      [titles.get(topSession.session), topSession.session]
                         .filter(Boolean)
                         .join("\n")
                     }
                   >
-                    {shortId(status.bySession[0].session)}
+                    {shortId(topSession.session)}
                   </Link>{" "}
-                  · {fmtCost(status.bySession[0].cost)}
+                  · {fmtCost(topSession.cost)}
                 </div>
               )}
               <div className="tile-note">
@@ -597,6 +637,7 @@ export default function StatusView({ provider }: { provider: Provider }) {
                     className={`seg-btn ${breakdown === b ? "on" : ""}`}
                     aria-pressed={breakdown === b}
                     onClick={() => {
+                      breakdownPinned.current = true;
                       setBreakdown(b);
                       setShowAll(false);
                     }}
@@ -640,7 +681,7 @@ export default function StatusView({ provider }: { provider: Provider }) {
                     <tr
                       key={key}
                       id={`usage-${key}`}
-                      className={focus?.session === key ? "focused" : ""}
+                      className={focusKey === key ? "focused" : ""}
                     >
                       <td>{cell}</td>
                       <TotalsCells totals={totals} />
@@ -661,7 +702,7 @@ export default function StatusView({ provider }: { provider: Provider }) {
                 onClick={() => setShowAll((v) => !v)}
               >
                 {showAll
-                  ? `Show top ${TOP_ROWS}`
+                  ? `Show ${TOP_ROWS} most recent`
                   : `Show all ${rows.length} ${breakdown}s`}
               </button>
             )}

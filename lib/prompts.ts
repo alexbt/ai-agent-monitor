@@ -6,6 +6,19 @@ import { codexSessionPath } from "./codex";
 const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
 // One prompt the human actually typed, in the order it was sent.
+// Moments while working on a prompt that involved you, or threw work away.
+//
+// Deliberately NOT "did any tool call fail". Ordinary tool errors — a failed
+// grep, a stale string in an edit, a typo in a command — are retried and fixed
+// on the next call, and flagging them marks about a third of all prompts, which
+// makes the signal worthless. These three are different: two of them are you,
+// and the third is time lost.
+export interface Friction {
+  rejected: number; // you declined a tool call
+  interrupted: number; // you stopped it mid-flight
+  timedOut: number; // a command was killed for running too long
+}
+
 export interface Prompt {
   n: number; // 1-based position within the session
   text: string;
@@ -14,6 +27,8 @@ export interface Prompt {
   // caused can be traced back to it, which is what per-prompt cost joins on.
   // Null for Codex, which has no equivalent.
   id: string | null;
+  // Null when nothing notable happened, which is the common case.
+  friction: Friction | null;
 }
 
 const MAX_TEXT = 300;
@@ -85,7 +100,16 @@ type LineParser = (
   entry: any
 ) => { text: string; ts: number; trusted: boolean; id: string | null } | null;
 
-function readIncremental(filePath: string, parseLine: LineParser): Prompt[] {
+// Which kind of friction, if any, this line records. Transcripts are written in
+// order, so an event belongs to the most recent prompt seen — no need to walk
+// the parentUuid chain the way per-prompt cost does.
+type FrictionParser = (entry: any) => keyof Friction | null;
+
+function readIncremental(
+  filePath: string,
+  parseLine: LineParser,
+  frictionOf?: FrictionParser
+): Prompt[] {
   let size = 0;
   try {
     size = fs.statSync(filePath).size;
@@ -130,6 +154,17 @@ function readIncremental(filePath: string, parseLine: LineParser): Prompt[] {
     } catch {
       continue;
     }
+    // Friction lands on whichever prompt is currently open. Checked before the
+    // prompt parser so an event never jumps forward onto the next prompt.
+    const kind = frictionOf?.(parsed);
+    if (kind) {
+      const open = prompts[prompts.length - 1];
+      if (open) {
+        open.friction ??= { rejected: 0, interrupted: 0, timedOut: 0 };
+        open.friction[kind]++;
+      }
+      continue;
+    }
     const hit = parseLine(parsed);
     if (!hit) continue;
     if (hit.trusted ? !hit.text.trim() : !isRealPrompt(hit.text)) continue;
@@ -139,6 +174,7 @@ function readIncremental(filePath: string, parseLine: LineParser): Prompt[] {
       text: clean(hit.text),
       ts: hit.ts,
       id: hit.id,
+      friction: null,
     });
   }
 
@@ -173,6 +209,15 @@ const claudeLine: LineParser = (entry) => {
   };
 };
 
+// The three signals worth surfacing. Everything else a transcript calls an
+// error is routine and self-corrected — see the note on `Friction`.
+const claudeFriction: FrictionParser = (entry) => {
+  if (entry?.toolDenialKind === "user-rejected") return "rejected";
+  if (entry?.interruptedMessageId) return "interrupted";
+  if (entry?.toolUseResult?.timedOutAfterMs) return "timedOut";
+  return null;
+};
+
 const codexLine: LineParser = (entry) => {
   if (entry?.type !== "event_msg" || entry.payload?.type !== "user_message") {
     return null;
@@ -189,10 +234,13 @@ const codexLine: LineParser = (entry) => {
   };
 };
 
+// Codex rollouts record no equivalent of any of the three, so nothing to read.
+
 export function claudePrompts(project: string, sessionId: string): Prompt[] {
   return readIncremental(
     path.join(PROJECTS_DIR, project, `${sessionId}.jsonl`),
-    claudeLine
+    claudeLine,
+    claudeFriction
   );
 }
 

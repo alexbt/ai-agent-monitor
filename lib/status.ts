@@ -103,6 +103,7 @@ export interface TokenTotals {
 
 export interface ModelTotals extends TokenTotals {
   model: string;
+  lastActivity: number;
 }
 
 // Spend rolled up by working directory. `project` is the same key the session
@@ -255,21 +256,26 @@ function sumTurns(turns: Turn[]): TokenTotals {
   return turns.reduce(addTurn, emptyTotals());
 }
 
-// Cost first: the whole point of these breakdowns is "what is expensive". Turns
-// on unpriced models still sort by tokens among themselves.
-function byCost(a: TokenTotals, b: TokenTotals): number {
-  return b.cost - a.cost || b.total - a.total;
+// Newest first, across every breakdown: what you were just doing is what you
+// came to look at. Cost breaks ties so the order stays stable when two rows
+// share a last-activity timestamp.
+function byRecency(
+  a: { lastActivity: number; cost: number; total: number },
+  b: { lastActivity: number; cost: number; total: number }
+): number {
+  return b.lastActivity - a.lastActivity || b.cost - a.cost || b.total - a.total;
 }
 
 function groupByModel(turns: Turn[]): ModelTotals[] {
   const byModel = new Map<string, ModelTotals>();
   for (const turn of turns) {
     const model = turn.model ?? "unknown";
-    const entry = byModel.get(model) ?? { model, ...emptyTotals() };
+    const entry = byModel.get(model) ?? { model, lastActivity: 0, ...emptyTotals() };
+    entry.lastActivity = Math.max(entry.lastActivity, turn.ts);
     addTurn(entry, turn);
     byModel.set(model, entry);
   }
-  return [...byModel.values()].sort((a, b) => b.total - a.total);
+  return [...byModel.values()].sort(byRecency);
 }
 
 function groupByProject(turns: Turn[]): ProjectTotals[] {
@@ -297,7 +303,7 @@ function groupByProject(turns: Turn[]): ProjectTotals[] {
   }
   return [...byProject.values()]
     .map(({ ids, ...rest }) => ({ ...rest, sessions: ids.size }))
-    .sort(byCost);
+    .sort(byRecency);
 }
 
 function groupByPrompt(turns: Turn[]): PromptTotals[] {
@@ -328,7 +334,7 @@ function groupByPrompt(turns: Turn[]): PromptTotals[] {
   }
   return [...byPrompt.values()]
     .map(({ seen, ...rest }) => ({ ...rest, models: [...seen] }))
-    .sort(byCost);
+    .sort(byRecency);
 }
 
 function groupBySession(turns: Turn[]): SessionTotals[] {
@@ -355,7 +361,7 @@ function groupBySession(turns: Turn[]): SessionTotals[] {
   }
   return [...bySession.values()]
     .map(({ seen, ...rest }) => ({ ...rest, models: [...seen] }))
-    .sort(byCost);
+    .sort(byRecency);
 }
 
 // The active window is the last one opened: walk forward, restarting whenever a

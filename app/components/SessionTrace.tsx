@@ -328,6 +328,8 @@ export default function SessionTrace({
   // and highlighted while the user reads.
   const [focusIdx, setFocusIdx] = useState<number | null>(null);
   const focusDone = useRef<string | null>(null);
+  // Where the error walker last stopped, so next/prev resume from there.
+  const errorCursor = useRef(-1);
 
   useEffect(() => {
     setItems([]);
@@ -428,6 +430,37 @@ export default function SessionTrace({
   );
   const allOpen = withDetail.length > 0 && withDetail.every((i) => openIdx.has(i));
 
+  // Inside a trace, every failed call is worth being able to reach — unlike the
+  // session lists, where routine tool errors are noise. A 10,000-row trace has
+  // no other way to find the red rows.
+  const errorIdx = useMemo(
+    () => shown.filter(({ item }) => item.error).map(({ idx }) => idx),
+    [shown]
+  );
+
+  const jumpToError = useCallback(
+    (dir: 1 | -1) => {
+      if (errorIdx.length === 0) return;
+      const from = errorCursor.current;
+      // Wraps in both directions, so repeated presses cycle the whole trace.
+      const next =
+        dir === 1
+          ? (errorIdx.find((i) => i > from) ?? errorIdx[0])
+          : ([...errorIdx].reverse().find((i) => i < from) ??
+            errorIdx[errorIdx.length - 1]);
+      errorCursor.current = next;
+      setFocusIdx(next);
+      followRef.current = false;
+      const box = boxRef.current;
+      const row = box?.querySelector(`[data-idx="${next}"]`);
+      if (!box || !row) return;
+      const delta =
+        row.getBoundingClientRect().top - box.getBoundingClientRect().top;
+      box.scrollTop += delta - (box.clientHeight - row.clientHeight) / 2;
+    },
+    [errorIdx]
+  );
+
   return (
     <div className={`trace-wrap ${fullscreen ? "fullscreen" : ""}`}>
       <div className="trace-search">
@@ -441,6 +474,31 @@ export default function SessionTrace({
         {q && (
           <span className="search-status">
             {shown.length} match{shown.length === 1 ? "" : "es"}
+          </span>
+        )}
+        {errorIdx.length > 0 && (
+          <span className="error-nav">
+            <button
+              type="button"
+              className="nav-btn sm"
+              onClick={() => jumpToError(-1)}
+              title="Previous failed call"
+              aria-label="Previous failed call"
+            >
+              ↑
+            </button>
+            <span className="error-count" title="Tool calls that returned an error">
+              {errorIdx.length} failed
+            </span>
+            <button
+              type="button"
+              className="nav-btn sm"
+              onClick={() => jumpToError(1)}
+              title="Next failed call"
+              aria-label="Next failed call"
+            >
+              ↓
+            </button>
           </span>
         )}
         {withDetail.length > 0 && (
