@@ -54,13 +54,13 @@ Runtime dependencies are just Next.js and React (installed via npm):
 | `make build` | production build (skipped when no source file has changed) |
 | `make start` | install if needed, build if needed, then serve it in production mode |
 | `make stop` | stop a server started by `dev` or `start` (`make stop PORT=3001` for another port) |
+| `make clean` | remove build artifacts (`.next`, TS build cache) |
 
 Ctrl-C stops `make dev` / `make start` cleanly. It needs help to do so: make's recipe
 shell swallows the interrupt, and `next` then shuts down *gracefully* — draining open
 connections, which never completes because an open dashboard tab holds SSE streams
 indefinitely. Both targets therefore trap the interrupt and stop the server outright,
 clearing the `next-server` worker that would otherwise be orphaned and keep the port.
-| `make clean` | remove build artifacts (`.next`, TS build cache) |
 
 Without make: `npm install`, then `npm run dev`.
 
